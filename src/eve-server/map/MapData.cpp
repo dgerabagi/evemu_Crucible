@@ -116,8 +116,20 @@ void MapData::GetMissionDestination(Agent* pAgent, uint8 misionType, MissionOffe
             station = false;
             destRange += pAgent->GetLevel();
         } break;
+        case Encounter: {
+            // Encounter missions: destination = agent's station (turn-in point).
+            // The dungeon/combat location is stored in dungeonLocationID separately.
+            // See A371 — encounter destination fix
+            StationData esd = StationData();
+            stDataMgr.GetStationData(pAgent->GetStationID(), esd);
+            offer.destinationID         = pAgent->GetStationID();
+            offer.destinationOwnerID    = esd.corporationID;
+            offer.destinationSystemID   = esd.systemID;
+            offer.destinationTypeID     = esd.typeID;
+            offer.dungeonSolarSystemID  = pAgent->GetSystemID();
+            return;
+        } break;
         case Mining:
-        case Encounter:
         case Storyline: {
             station = false;
             //destRange = offer.range;

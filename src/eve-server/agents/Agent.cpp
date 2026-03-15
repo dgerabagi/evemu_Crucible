@@ -219,7 +219,7 @@ void Agent::MakeOffer(uint32 charID, MissionOffer& offer)
     if (offer.destinationID == 0) {
         // make error here and reset
         sEntityList.FindClientByCharID(charID)->SendErrorMsg("Internal Server Error. Ref: ServerError 07208.");
-        //return;
+        return;
     }
 
     // not sure how this is checked/set
