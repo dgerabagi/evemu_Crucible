@@ -149,6 +149,8 @@ public:
     bool IsUndocking()                                  { return m_isUndocking; }
     void SetDocked()                                    { m_isDocking = false; }
     void SetUndocking(bool set=false)                   { m_isUndocking = set; }
+    // See A338 §Fix5 — notify client of online modules for turret rendering
+    void SendOnlineModuleEffects()                      { m_ModuleManager->SendOnlineModuleEffects(); }
     InventoryItemRef GetTargetRef()                     { return m_targetRef; }
     void ClearTargetRef()                               { m_targetRef = InventoryItemRef(); }
     // this is for repairing modules with nanite paste

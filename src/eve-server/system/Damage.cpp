@@ -97,6 +97,28 @@ chargeRef(InventoryItemRef(nullptr))
 }
 
 bool SystemEntity::ApplyDamage(Damage &d) {
+    // See A334 §2.10 — Asteroids are immune to weapon damage (real EVE behavior).
+    // Only mining modules extract resources, and they bypass ApplyDamage entirely.
+    if (IsAsteroidSE()) {
+        _log(DAMAGE__INFO, "%s(%u): Weapon damage rejected — target is asteroid (immune).",
+                GetName(), GetID());
+        // See A338 §Fix4 — Send OnDamageMessage to attacker even for immune asteroids.
+        // Client-side DamageMessageTurretPropogation requires this event (with 'target' key)
+        // to animate own-ship turret fire.  Without it, beams are invisible to the shooter.
+        if (d.srcSE->HasPilot()) {
+            PyDict* dict = new PyDict();
+                dict->SetItemString("weapon", new PyInt(d.weaponRef->itemID()));
+                dict->SetItemString("target", new PyInt(GetID()));
+                dict->SetItemString("damage", new PyFloat(0.0));
+            PyTuple* tuple = new PyTuple(3);
+                tuple->SetItem(0, new PyString("OnDamageMessage"));
+                tuple->SetItem(1, new PyString(Dmg::Msg::Given[5]));   // "AttackHit3" → hitQuality 3
+                tuple->SetItem(2, dict);
+            d.srcSE->GetPilot()->QueueDestinyEvent(&tuple);
+        }
+        return false;
+    }
+
     double profileStartTime(GetTimeUSeconds());
 
     if (is_log_enabled(DAMAGE__MESSAGE)) {

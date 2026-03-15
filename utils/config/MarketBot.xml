@@ -18,6 +18,10 @@
         <OrderLifetime>5</OrderLifetime><!-- in days (5 day default) -->
         <OrdersPerRefresh>10</OrdersPerRefresh><!-- default: 10 -->
         <MaxISKPerOrder>1500000000</MaxISKPerOrder><!-- default: 1b5 -->
+        <!-- See A329 §4 — Economy reform price multipliers -->
+        <BuyPriceMultiplier>1.0</BuyPriceMultiplier><!-- multiplier on basePrice for buy orders (default: 1.0) -->
+        <SellPriceMultiplier>5.0</SellPriceMultiplier><!-- multiplier on basePrice for sell orders (default: 5.0) -->
+        <SystemsPerCycle>10</SystemsPerCycle><!-- random systems per cycle (default: 10) -->
     </main>
 
     <buy>

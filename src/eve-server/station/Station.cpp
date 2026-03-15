@@ -258,6 +258,22 @@ void StationItem::RemoveGuest(Client* pClient)
     m_guestList.erase(pClient->GetCharacterID());
 }
 
+// See A321 §4.7 — Phantom AI character station presence
+void StationItem::AddPhantomGuest(uint32 charID)
+{
+    m_phantomGuests.insert(charID);
+}
+
+void StationItem::RemovePhantomGuest(uint32 charID)
+{
+    m_phantomGuests.erase(charID);
+}
+
+void StationItem::GetPhantomGuests(std::set<uint32>& guests) const
+{
+    guests = m_phantomGuests;
+}
+
 void StationItem::GetRefineData(uint32& stationCorpID, float& staEfficiency, float& tax)
 {
     stationCorpID = m_data.corporationID;

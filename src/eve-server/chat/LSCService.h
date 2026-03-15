@@ -62,6 +62,9 @@ public:
     void CreateSystemChannel(int32 channelID);
     void SystemUnload(uint32 systemID, uint32 constID, uint32 regionID);
 
+    // See A321 §4.7 — Phantom session needs to look up Local channels
+    LSCChannel *GetChannelByID(int32 channelID);
+
     void SendMail(uint32 sender, uint32 recipient, const std::string &subject, const std::string &content) {
         std::vector<int32> recs(1, recipient);
         SendMail(sender, recs, subject, content);
@@ -100,7 +103,6 @@ private:
     SlashService* m_slash;
 
     void CreateStaticChannels();
-    LSCChannel *GetChannelByID(int32 channelID);
     LSCChannel *GetChannelByName(std::string  channelName);
     LSCChannel *CreateChannel(int32 channelID, uint32 ownerID, const char* name, std::string motd, const char* password, const char* compkey,
                               LSC::Type type = LSC::Type::normal, uint32 cspa = 0, int32 groupMessageID = 0, int32 channelMessageID = 0,

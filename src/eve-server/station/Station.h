@@ -108,6 +108,11 @@ public:
     void AddGuest(Client* pClient);
     void RemoveGuest(Client* pClient);
 
+    // See A321 §4.7 — Phantom AI character station presence (no Client* needed)
+    void AddPhantomGuest(uint32 charID);
+    void RemovePhantomGuest(uint32 charID);
+    void GetPhantomGuests(std::set<uint32>& guests) const;
+
     void GetRefineData(uint32& stationCorpID, float& staEfficiency, float& tax);
 
     // does client have a ship in this station?
@@ -161,6 +166,7 @@ private:
     uint32                                              m_stationID;
 
     std::map<uint32, Client*>                           m_guestList; // charID/Client*
+    std::set<uint32>                                     m_phantomGuests; // See A321 §4.7 — phantom AI charIDs
 
     std::map<uint32, OfficeData>                        m_officeMap;   // officeID/data
     std::map<uint32, bool>                              m_officeLoaded;

@@ -35,6 +35,7 @@
 #include "npc/Drone.h"
 #include "npc/NPC.h"
 #include "npc/Sentry.h"
+#include "npc/AIShipSE.h"
 #include "packets/Destiny.h"
 #include "planet/Planet.h"
 #include "planet/Moon.h"
@@ -326,6 +327,9 @@ void SystemManager::UnloadSystem() {
             m_staticEntities.erase(m_staticEntities.find(itr->first));
         } else if (pSE->IsShipSE()) {
             pSE->GetShipSE()->GetShipItemRef()->LogOut();
+        } else if (pSE->IsAIShipSE()) {
+            // See A321 §4.6 — clean up AI ship tracking in EntityList
+            sEntityList.RemoveAIShip(pSE->GetAIShipSE()->GetCharID());
         } else if (pSE->IsNPCSE()) {
             sEntityList.RemoveNPC();    // this is for loaded npc count.
             pSE->GetSelf()->Delete();
@@ -1095,6 +1099,7 @@ void SystemManager::RemoveEntity(SystemEntity* pSE) {
     // remove entity from our maps
     uint32 itemID(pSE->GetID());
     m_entityChanged = true;
+    m_entities.erase(itemID);  // must erase from master map to avoid dangling pointers during UnloadSystem
     m_ticEntities.erase(itemID);
     m_staticEntities.erase(itemID);
     m_opStaticEntities.erase(itemID);
@@ -1728,6 +1733,10 @@ bool SystemManager::SafeToUnload()
             if (cur.second->GetPlanetSE()->HasColony()) { // Need to prevent unloading of any Planet SE where colonies exist so that they continue to be processed.
                 return false;
             }
+        }
+        // See A321 §4.6 — AI ships keep the system loaded (no real Client*, but still active)
+        if (cur.second->IsAIShipSE()) {
+            return false;
         }
     }
     return true; //by default, its always safe to unload

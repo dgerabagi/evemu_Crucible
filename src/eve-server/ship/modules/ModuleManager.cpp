@@ -179,6 +179,53 @@ void ModuleManager::LoadOnline() {
     }
 }
 
+// See A338 §Fix5 — send OnGodmaShipEffect (effectID=16) for all online fitted modules.
+// Called after undock completes so the client initializes turret models for own-ship beam rendering.
+// During undock, ModuleItem::SetOnline() skips the notification (IsUndock guard), so we resend here.
+void ModuleManager::SendOnlineModuleEffects() {
+    Client* pClient = pShipItem->GetPilot();
+    if (pClient == nullptr)
+        return;
+
+    PyList* events = new PyList();
+    for (auto cur : m_fittings) {
+        if (cur.second == nullptr)
+            continue;
+        if (!cur.second->isOnline())
+            continue;
+
+        GodmaEnvironment ge;
+            ge.selfID = cur.second->itemID();
+            ge.charID = pClient->GetCharacterID();
+            ge.shipID = pShipItem->itemID();
+            ge.target = PyStatic.NewNone();
+            ge.subLoc = PyStatic.NewNone();
+            ge.area = new PyList();
+            ge.effectID = 16;
+        Notify_OnGodmaShipEffect shipEff;
+            shipEff.itemID = ge.selfID;
+            shipEff.effectID = ge.effectID;
+            shipEff.timeNow = GetFileTimeNow();
+            shipEff.start = true;
+            shipEff.active = true;
+            shipEff.environment = ge.Encode();
+            shipEff.startTime = shipEff.timeNow;
+            shipEff.duration = 0.0;
+            shipEff.repeat = 1;
+            shipEff.error = PyStatic.NewNone();
+        events->AddItem(shipEff.Encode());
+    }
+
+    if (events->size() > 0) {
+        Notify_OnMultiEvent multi;
+            multi.events = events;
+        PyTuple* tmp = multi.Encode();
+        pClient->SendNotification("OnMultiEvent", "clientID", &tmp);
+    } else {
+        PyDecRef(events);
+    }
+}
+
 void ModuleManager::Process()
 {
     double profileStartTime(GetTimeUSeconds());

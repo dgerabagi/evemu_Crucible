@@ -27,6 +27,7 @@
 
 #include "EntityList.h"
 #include "Client.h"
+#include "station/Station.h"
 #include "station/StationService.h"
 
 StationService::StationService() :
@@ -53,6 +54,33 @@ PyResult StationService::GetGuests(PyCallArgs &call) {
 			t->items[2] = new PyInt(cur->GetAllianceID());
 			t->items[3] = new PyInt(cur->GetWarFactionID());
         res->AddItem(t);
+    }
+
+    // See A321 §4.7 — Include phantom AI characters in station guest list
+    // Query DB directly since phantom players may have logged in before system/station was loaded
+    {
+        uint32 stationID = call.client->GetStationID();
+        const std::set<uint32>& phantoms = sEntityList.GetPhantomPlayers();
+        for (uint32 phantomID : phantoms) {
+            DBQueryResult charRes;
+            if (!sDatabase.RunQuery(charRes,
+                "SELECT c.stationID, c.corporationID, IFNULL(corp.allianceID,0), IFNULL(corp.warFactionID,0)"
+                " FROM chrCharacters c"
+                " LEFT JOIN crpCorporation corp ON corp.corporationID = c.corporationID"
+                " WHERE c.characterID = %u", phantomID))
+                continue;
+            DBResultRow row;
+            if (!charRes.GetRow(row))
+                continue;
+            if (row.GetUInt(0) != stationID)
+                continue;  // phantom is at a different station
+            PyTuple* t = new PyTuple(4);
+                t->items[0] = new PyInt(phantomID);
+                t->items[1] = new PyInt(row.GetUInt(1));
+                t->items[2] = new PyInt(row.GetUInt(2));
+                t->items[3] = new PyInt(row.GetUInt(3));
+            res->AddItem(t);
+        }
     }
 
 	return res;

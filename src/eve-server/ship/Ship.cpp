@@ -2249,13 +2249,17 @@ PyList* ShipItem::ShipGetModuleList() {
     }
 
     PyList* result = new PyList();
-    // Create entries in "onslimitemchange" modules list for ALL modules, rigs, and subsystems present on ship:
-    std::vector<InventoryItemRef> moduleList;
-    m_ModuleManager->GetModuleListOfRefsAsc(moduleList);
-    for (auto cur : moduleList) {
+    // Only include hi-slot modules (turrets/launchers) — must match MakeSlimItem scope exactly.
+    // MakeSlimItem sends flagHiSlot0..flagHiSlot7 only; including mid/low/rig modules here
+    // corrupts the client's turret model loader for own-ship rendering.
+    // Tuple order MUST be (itemID, typeID) — client uses tuple[0] as itemID.
+    // See A334 §2.11 — reversed order + wrong scope broke own-ship turret rendering.
+    std::vector<InventoryItemRef> hiSlotItems;
+    pInventory->GetItemsByFlagRange(flagHiSlot0, flagHiSlot7, hiSlotItems);
+    for (auto cur : hiSlotItems) {
         PyTuple* module = new PyTuple(2);
-        module->SetItem(0, new PyInt(cur->typeID()));
-        module->SetItem(1, new PyInt(cur->itemID()));
+        module->SetItem(0, new PyInt(cur->itemID()));
+        module->SetItem(1, new PyInt(cur->typeID()));
         result->AddItem(module);
     }
 

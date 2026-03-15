@@ -996,6 +996,11 @@ void Client::UndockFromStation() {
     SetSessionTimer();
 
     m_ship->SetUndocking(false);
+
+    // See A338 §Fix5 — send module online effects after ship is in space
+    // During undock, ModuleItem::SetOnline() skips OnGodmaShipEffect (IsUndock check).
+    // The client needs effectID=16 to initialize turret models for own-ship beam rendering.
+    m_ship->SendOnlineModuleEffects();
 }
 
 void Client::CreateShipSE() {

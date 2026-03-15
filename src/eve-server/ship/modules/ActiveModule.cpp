@@ -575,6 +575,55 @@ uint32 ActiveModule::DoCycle() {
         case EVEDB::invGroups::Energy_Weapon: {
             // turret weapons use specific code.
             ApplyDamage();
+            // See A334 §2.11 — resend beam visual + OnGodmaShipEffect each cycle.
+            //  Matches original c085e7a3 approach: per-cycle self_only godma event drives
+            //  own-client turret fire animation, SendSpecialEffect drives observer beams.
+            if (m_destinyMgr != nullptr) {
+                std::string guid = sFxDataMgr.GetEffectGuid(m_effectID);
+                if (!guid.empty()) {
+                    uint16 chgTypeID = ((m_chargeRef.get() != nullptr) ? m_chargeRef->typeID() : 0);
+                    float duration = m_modRef->GetAttribute(AttrSpeed).get_float();
+
+                    // 1) OnGodmaShipEffect to own client (self_only) — drives own-ship turret animation
+                    if (m_shipRef->HasPilot()) {
+                        GodmaEnvironment ge;
+                            ge.selfID = m_modRef->itemID();
+                            ge.charID = m_shipRef->ownerID();
+                            ge.shipID = m_shipRef->itemID();
+                            ge.target = IsValidTarget(m_targetID) ? new PyInt(m_targetID) : PyStatic.NewNone();
+                            ge.subLoc = PyStatic.NewNone();
+                            ge.area = new PyList();
+                            ge.effectID = m_effectID;
+                        Notify_OnGodmaShipEffect shipEff;
+                            shipEff.itemID = m_modRef->itemID();
+                            shipEff.effectID = m_effectID;
+                            shipEff.timeNow = GetFileTimeNow();
+                            shipEff.start = 1;
+                            shipEff.active = 1;
+                            shipEff.environment = ge.Encode();
+                            shipEff.startTime = shipEff.timeNow;
+                            shipEff.duration = duration;
+                            shipEff.repeat = m_repeat;
+                            shipEff.error = PyStatic.NewNone();
+                        PyTuple* ev = shipEff.Encode();
+                        m_shipRef->GetPilot()->QueueDestinyEvent(&ev);
+                    }
+
+                    // 2) SendSpecialEffect to all clients — drives observer beam rendering
+                    m_destinyMgr->SendSpecialEffect(
+                            m_shipRef->itemID(),
+                            m_modRef->itemID(),
+                            m_modRef->typeID(),
+                            m_targetID,
+                            chgTypeID,
+                            guid,
+                            sFxDataMgr.isOffensive(m_effectID),
+                            true,       // start
+                            true,       // active
+                            (int32)duration,
+                            1);         // repeat = 1 (single pulse per cycle)
+                }
+            }
         } break;
         case EVEDB::invGroups::Missile_Launcher_Assault:
         case EVEDB::invGroups::Missile_Launcher_Bomb:   // not sure here
@@ -1242,6 +1291,10 @@ void ActiveModule::ShowEffect(bool active/*false*/, bool abort/*false*/)
 
     uint16 chgTypeID(((m_chargeRef.get() != nullptr) ? m_chargeRef->typeID() : 0));
     uint32 timeLeft(GetRemainingCycleTimeMS());
+
+    _log(MODULE__TRACE, "ShowEffect: active=%s abort=%s ship=%u mod=%u(%s) type=%u target=%u charge=%u guid=%s effectID=%u timeLeft=%u repeat=%d",
+            active?"true":"false", abort?"true":"false", m_shipRef->itemID(), m_modRef->itemID(), m_modRef->name(),
+            m_modRef->typeID(), m_targetID, chgTypeID, guidStr.c_str(), m_effectID, timeLeft, m_repeat);
 
     if (m_destinyMgr != nullptr)
         m_destinyMgr->SendSpecialEffect(

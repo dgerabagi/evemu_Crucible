@@ -83,14 +83,18 @@ void BeltMgr::ClearAll() {
 
 void BeltMgr::CheckSpawn(uint16 bubbleID)
 {
+    sLog.Cyan("        BeltMgr", "CheckSpawn called for bubbleID %u (IsSpawned=%s)", bubbleID, IsSpawned(bubbleID) ? "true" : "false");
     if (IsSpawned(bubbleID))
         return;
     /*  if there are already roids created for this belt, they will be loaded in Load()
      * if Load() has roids for this belt, this belt will have true already set, and checked in SpawnBelt()
      */
-    if (!Load(bubbleID)) {
+    bool loaded = Load(bubbleID);
+    sLog.Cyan("        BeltMgr", "Load(%u) returned %s", bubbleID, loaded ? "true" : "false");
+    if (!loaded) {
         std::unordered_multimap<float, uint16> roidTypes;
         roidTypes.clear();
+        sLog.Cyan("        BeltMgr", "Calling SpawnBelt(%u)", bubbleID);
         SpawnBelt(bubbleID, roidTypes);
     }
 }
@@ -147,6 +151,14 @@ bool BeltMgr::Load(uint16 bubbleID) {
     if (!ManagerDB::LoadSystemRoids(m_system->GetID(), beltID, entities))
         return false;
 
+    // Get the target belt bubble so we can correct bubble assignment.
+    // BubbleManager uses an unordered_multimap, so FindBubble may return a
+    // warp-transit bubble that overlaps the belt bubble before it finds the
+    // actual belt bubble.  We fix that here by moving misplaced asteroids.
+    SystemEntity* pBeltSE = m_system->GetSE(beltID);
+    SystemBubble* pBeltBubble = (pBeltSE != nullptr) ? pBeltSE->SysBubble() : nullptr;
+
+    uint32 loadedCount = 0;
     for (auto entity : entities) {
         AsteroidItemRef itemRef = sItemFactory.GetAsteroidRef(entity.itemID);
         if (itemRef.get() == nullptr) {
@@ -166,9 +178,24 @@ bool BeltMgr::Load(uint16 bubbleID) {
         }
         _log(COSMIC_MGR__TRACE, "BeltMgr::Load() - Loaded asteroid %u, type %u for %s(%u)", entity.itemID, entity.typeID, m_system->GetName(), m_system->GetID() );
         m_system->AddEntity(pASE);
+        // Correct bubble assignment: if AddEntity placed the asteroid in a
+        // wrong bubble (due to unordered_multimap iteration hitting an
+        // overlapping transit bubble first), move it to the belt bubble.
+        if (pBeltBubble != nullptr && pASE->SysBubble() != pBeltBubble) {
+            pASE->SysBubble()->Remove(pASE);
+            pBeltBubble->Add(pASE);
+        }
         m_asteroids.emplace(std::pair<uint32, AsteroidSE*>(beltID, pASE));
         pASE->SetMgr(this, beltID);
+        ++loadedCount;
     }
+
+    // Only mark belt as spawned if at least one asteroid was actually created.
+    // Stale sysAsteroids entries (from crash/incomplete save) would otherwise
+    // prevent SpawnBelt() from ever running.
+    if (loadedCount == 0)
+        return false;
+
     std::map<uint32, bool>::iterator itr = m_spawned.find(beltID);
     if (itr == m_spawned.end()) {
         m_spawned.insert(std::pair<uint32, bool>(beltID, true));
@@ -421,6 +448,19 @@ void BeltMgr::SpawnAsteroid(uint32 beltID, uint32 typeID, double radius, const G
     m_asteroids.emplace(std::pair<uint32, AsteroidSE*>(beltID, pASE));
     pASE->SetMgr(this, beltID);
     m_system->AddEntity(pASE, false);   // we're not adding roids to signal list
+
+    // Correct bubble assignment: AddEntity may place the asteroid in a wrong
+    // bubble due to BubbleManager's unordered_multimap hitting an overlapping
+    // warp-transit bubble before the actual belt bubble.
+    // Look up the correct belt bubble and move the asteroid if needed.
+    SystemEntity* pBeltSE = m_system->GetSE(beltID);
+    if (pBeltSE != nullptr && pBeltSE->SysBubble() != nullptr
+        && pASE->SysBubble() != nullptr
+        && pASE->SysBubble() != pBeltSE->SysBubble())
+    {
+        pASE->SysBubble()->Remove(pASE);
+        pBeltSE->SysBubble()->Add(pASE);
+    }
 }
 
 void BeltMgr::RemoveAsteroid(uint32 beltID, AsteroidSE* pASE)

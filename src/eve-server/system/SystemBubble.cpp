@@ -308,7 +308,10 @@ void SystemBubble::Add(SystemEntity* pSE) {
         // }
     }
 
-    if (pSE->HasPilot()) {
+    // See A321 §4.2 — AI ships trigger belt/gate spawns like players do
+    if (pSE->HasPilot() or pSE->IsAIShipSE()) {
+        sLog.Green("  SystemBubble", "Add() belt/spawn check: entity=%s(%u) HasPilot=%d IsAIShip=%d m_belt=%d bubble=%u",
+            pSE->GetName(), pSE->GetID(), pSE->HasPilot(), pSE->IsAIShipSE(), m_belt, m_bubbleID);
         // Set spawn timer for this bubble, if needed
         if (m_belt) {
             // check for roids and load/spawn as needed.
@@ -327,15 +330,23 @@ void SystemBubble::Add(SystemEntity* pSE) {
             }
         }
 
-        Client* pClient(pSE->GetPilot());
+        // Player-specific client management (not for AI ships)
+        if (pSE->HasPilot()) {
+            Client* pClient(pSE->GetPilot());
 
-        SendAddBalls( pSE );
+            SendAddBalls( pSE );
 
-        if (!m_players.empty()) {
-            AddBallExclusive(pSE);  // adds new player to all players in bubble, if any
+            if (!m_players.empty()) {
+                AddBallExclusive(pSE);  // adds new player to all players in bubble, if any
+            }
+
+            m_players[pClient->GetCharacterID()] = pClient;   //add to bubble's player list
+        } else if (pSE->IsAIShipSE()) {
+            // See A334 §bubble-fix — AI ships must notify existing players in bubble
+            if (!m_players.empty()) {
+                AddBallExclusive(pSE);
+            }
         }
-
-        m_players[pClient->GetCharacterID()] = pClient;   //add to bubble's player list
     } else {
         if (!m_players.empty())
             AddBallExclusive(pSE);
@@ -544,6 +555,15 @@ void SystemBubble::GetAllEntities(std::map< uint32, SystemEntity* >& into) const
         into.emplace(cur.first, cur.second);
 }
 
+
+void SystemBubble::GetStaticEntities(std::map< uint32, SystemEntity* >& into) const
+{
+    if (m_entities.empty())
+        return;
+
+    for (auto cur : m_entities)
+        into.emplace(cur.first, cur.second);
+}
 
 void SystemBubble::GetEntityVec(std::vector< SystemEntity* >& into) const
 {

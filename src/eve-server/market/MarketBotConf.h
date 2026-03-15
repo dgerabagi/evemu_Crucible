@@ -31,6 +31,10 @@ public:
         uint8 OrderLifetime;
         uint16 OrdersPerRefresh;
         uint32 MaxISKPerOrder;
+        // See A329 §3.1 — configurable price multipliers for economy reform
+        float BuyPriceMultiplier;   // multiplier applied to basePrice for buy orders (default 1.0)
+        float SellPriceMultiplier;  // multiplier applied to basePrice for sell orders (default 5.0)
+        uint8 SystemsPerCycle;      // number of random systems per cycle (default 10)
     } main;
 
     // From <buy/>

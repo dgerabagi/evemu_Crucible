@@ -25,44 +25,38 @@
 #include <random>
 #include <cstdint>
 #include <chrono>
+#include <set>
 
 extern SystemManager* sSystemMgr;
 
 static constexpr int64 FILETIME_TICKS_PER_DAY = 864000000000;  // 100ns ticks per day; for expelorders to be removed prematurally
 
 static const uint32 MARKETBOT_MAX_ITEM_ID = 30000;
-static const std::vector<uint32> VALID_GROUPS = {
-    // Ores & Mining
-    18,                                    // Minerals
-    450, 451, 452, 453, 454, 455, 456,     // Raw ores (part 1)
-    457, 458, 459, 460, 461, 462,
-    465, 466, 467, 468, 469,              // Raw ores (part 2)
-    479,                                  // Scanner Probe
-    482,                                  // Mining Crystals
-    492,                                  // Survey Probe
-    538,                                  // Data Miners
-    548,                                  // Interdiction Probe
-    663,                                  // Mercoxit Mining Crystals
 
-    // Ammo / Charges
-    83,                                   // Projectile Ammo
-    84,                                   // Missiles
-    85,                                   // Hybrid Charges
-    86,                                   // Frequency Crystals
-    87,                                   // Cap Booster Charges
-    88,                                   // Defender Missiles
-    89,                                   // Torpedoes
-    90,                                   // Bombs
-    92,                                   // Mines
-    372, 373, 374, 375, 376, 377,         // Advanced Ammo
-    384, 385, 386, 387, 388, 389,         // Extended Missiles (part 1)
-    390, 391, 392, 393, 394, 395, 396,    // Extended Missiles (part 2)
-    648,                                  // Advanced Rocket
-    653, 654, 655, 656, 657,              // Advanced Missiles
-    772,                                  // Assault Missiles
-
-    // Boosters for Implants
-    303
+// See A329 §3.4 — all published marketable categories (matches seed-market coverage)
+static const std::set<uint32> VALID_CATEGORIES = {
+    4,   // Material
+    5,   // Accessories
+    6,   // Ship
+    7,   // Module
+    8,   // Charge
+    9,   // Blueprint
+    16,  // Skill
+    17,  // Commodity
+    18,  // Drone
+    22,  // Deployable
+    23,  // Starbase
+    24,  // Reaction
+    25,  // Asteroid
+    32,  // Subsystem
+    34,  // Ancient Relics
+    35,  // Decryptors
+    39,  // Infrastructure Upgrades
+    40,  // Sovereignty Structures
+    41,  // Planetary Interaction
+    42,  // Planetary Resources
+    43,  // Planetary Commodities
+    46   // Orbitals
 };
 
 static constexpr uint32 BOT_OWNER_ID = 1000125; // NPC corp owner, default CONCORD
@@ -121,7 +115,7 @@ void MarketBotMgr::Process(bool overrideTimer) {
     codelog(MARKET__TRACE, ">> Entered MarketBotMgr::Process()");
 
     if (!m_initalized) {
-        sLog.Error("     MarketBotMgr", "MarketBotMgr not initialized � skipping run\n");
+        sLog.Error("     MarketBotMgr", "MarketBotMgr not initialized � skipping run\n");
         codelog(MARKET__ERROR, "Process() called but MarketBotMgr is not initialized.");
         return;
     }
@@ -130,7 +124,7 @@ void MarketBotMgr::Process(bool overrideTimer) {
         auto timeLeft = std::chrono::duration_cast<std::chrono::milliseconds>(m_nextRunTime - now).count();
         if (timeLeft > 0) {
             sLog.Green("     Trader Joe", "Update timer not ready yet. Next run in %lld seconds.", timeLeft / 1000);
-            codelog(MARKET__TRACE, "Trader Joe waiting � next run in %lld seconds.", timeLeft);
+            codelog(MARKET__TRACE, "Trader Joe waiting � next run in %lld seconds.", timeLeft);
             return;
         }
     }
@@ -171,7 +165,7 @@ void MarketBotMgr::ForceRun(bool resetTimer) {
     sLog.Warning("     ForceRun", "Manually starting Trader Joe.");
 
     if (!m_initalized) {
-        sLog.Yellow("     Trader Joe", "MarketBotMgr not initialized � skipping run.");
+        sLog.Yellow("     Trader Joe", "MarketBotMgr not initialized � skipping run.");
         return;
     }
 
@@ -303,7 +297,7 @@ int MarketBotMgr::PlaceSellOrders(uint32 systemID) {
     std::vector<uint32> availableStations;
 
     if (!sDataMgr.GetStationListForSystem(systemID, availableStations)) {
-        codelog(MARKET__ERROR, "Trader Joe: No stations found for system %u � skipping order creation.", systemID);
+        codelog(MARKET__ERROR, "Trader Joe: No stations found for system %u � skipping order creation.", systemID);
         return 0;
     } else {
         codelog(MARKET__TRACE, "Trader Joe: Found %zu stations in system %u", availableStations.size(), systemID);
@@ -381,12 +375,14 @@ std::vector<uint32> MarketBotMgr::GetEligibleSystems() {
         return { 30000142 };  // Jita (default system for testing)
     }
 
+    // See A329 §3.5 — configurable system coverage per cycle
     std::vector<uint32> systemIDs;
-    sDataMgr.GetRandomSystemIDs(5, systemIDs); // pulls a randomized list of systems
-    codelog(MARKET__TRACE, "GetEligibleSystems(): Pulled %zu systems from StaticDataMgr", systemIDs.size());
+    sDataMgr.GetRandomSystemIDs(sMBotConf.main.SystemsPerCycle, systemIDs);
+    codelog(MARKET__TRACE, "GetEligibleSystems(): Pulled %zu systems from StaticDataMgr (configured: %u)", systemIDs.size(), sMBotConf.main.SystemsPerCycle);
     return systemIDs;
 }
 
+// See A329 §3.4 — category-based item selection (replaces group whitelist)
 uint32 MarketBotMgr::SelectRandomItemID() {
     uint32 itemID = 0;
     const ItemType* type = nullptr;
@@ -397,59 +393,55 @@ uint32 MarketBotMgr::SelectRandomItemID() {
         itemID = GetRandomInt(10, MARKETBOT_MAX_ITEM_ID);
         type = sItemFactory.GetType(itemID);
 
-        if (type && std::find(VALID_GROUPS.begin(), VALID_GROUPS.end(), type->groupID()) != VALID_GROUPS.end()) {
-            codelog(MARKET__TRACE, "Selected itemID %u after %u attempts", itemID, tries);
+        if (type && type->published() && type->basePrice() > 0 && VALID_CATEGORIES.count(type->categoryID())) {
+            codelog(MARKET__TRACE, "Selected itemID %u (catID %u) after %u attempts", itemID, type->categoryID(), tries);
             return itemID;
         }
-    } while (tries < 50);
+    } while (tries < 100);
 
-    // If we fail after 50 attempts, log a warning and return fallback value
+    // If we fail after 100 attempts, log a warning and return fallback value
     codelog(MARKET__WARNING, "Failed to select valid itemID after %u attempts. Returning fallback itemID = 34 (Tritanium)", tries);
     return 34;  // Tritanium, as a safe default
 }
 
+// See A329 §3.6 — category-based quantity logic
 uint32 MarketBotMgr::GetRandomQuantity(uint32 groupID) {
-    // Large-quantity bulk groups: minerals, ammo, ores, charges, etc.
+    // For category-based selection, we use groupID to determine bulk vs unit quantity.
+    // Bulk groups: minerals (18), ores (450-469), ammo/charges (83-92, 372-396, 648-772)
     if (
         groupID == 18 ||                      // Minerals
         (groupID >= 83 && groupID <= 92) ||   // Basic ammo/charges
-        (groupID >= 372 && groupID <= 377) || // Advanced ammo
-        (groupID >= 384 && groupID <= 396) || // More missiles
+        (groupID >= 372 && groupID <= 396) || // Advanced ammo/missiles
+        (groupID >= 450 && groupID <= 469) || // Raw ores
         groupID == 479 ||                     // Scanner Probes
         groupID == 482 ||                     // Mining Crystals
-        groupID == 492 ||                     // Survey Probes
-        groupID == 538 ||                     // Data Miners
-        groupID == 548 ||                     // Interdiction Probe
         groupID == 648 ||                     // Advanced Rocket
         (groupID >= 653 && groupID <= 657) || // Advanced Missiles
-        groupID == 663 ||                     // Mercoxit Mining Crystals
-        groupID == 772 ||                     // Assault Missiles
-        (groupID >= 450 && groupID <= 462) || // Raw ores (part 1)
-        (groupID >= 465 && groupID <= 469)    // Raw ores (part 2)
+        groupID == 772                        // Assault Missiles
     ) {
         return GetRandomInt(1000, 1000000);  // Large stack sizes
     }
 
-    // Medium-volume: modules, rigs, etc.; way to many to list... disabled for the time being
-    // leaving below as an example.
-    /*if (
-        groupID == 62 ||  // Armor Repairers
-        groupID == 63 ||  // Hull Repair
-        groupID == 205    // Heat Sink
+    // Medium-volume: modules, drones, implants, small items
+    if (
+        groupID < 450 ||   // Most modules, skills, etc.
+        groupID >= 538     // Data miners, probes, etc.
     ) {
-        return GetRandomInt(10, 100);
-    }*/
+        return GetRandomInt(1, 50);  // Ships and expensive items get low quantities
+    }
 
-    // Fallback for anything else
+    // Fallback
     return GetRandomInt(10, 500);
 }
 
+// See A329 §3.3 — configurable price multipliers for economy reform
 double MarketBotMgr::CalculateBuyPrice(uint32 itemID) {
     const ItemType* type = sItemFactory.GetType(itemID);
-    return type ? type->basePrice() * GetRandomFloat(0.8f, 1.1f) : 1000.0;
+    return type ? type->basePrice() * sMBotConf.main.BuyPriceMultiplier * GetRandomFloat(0.9f, 1.1f) : 1000.0;
 }
 
+// See A329 §3.3 — sell at configured markup (default 5×) over basePrice
 double MarketBotMgr::CalculateSellPrice(uint32 itemID) {
     const ItemType* type = sItemFactory.GetType(itemID);
-    return type ? type->basePrice() * GetRandomFloat(1.0f, 1.3f) : 1000.0;
+    return type ? type->basePrice() * sMBotConf.main.SellPriceMultiplier * GetRandomFloat(0.9f, 1.1f) : 1000.0;
 }

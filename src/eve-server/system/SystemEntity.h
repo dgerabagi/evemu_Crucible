@@ -35,6 +35,7 @@
 
 class BeltMgr;
 class Character;
+class AIShipSE;
 class Client;
 class Concord;
 class ContainerSE;
@@ -152,6 +153,7 @@ public:
     virtual SBUSE*              GetSBUSE()              { return nullptr; }
     virtual IHubSE*             GetIHubSE()             { return nullptr; }
     /* Dynamic */
+    virtual AIShipSE*           GetAIShipSE()           { return nullptr; }
     virtual DynamicSystemEntity* GetDynamicSE()         { return nullptr; }
     virtual NPC*                GetNPCSE()              { return nullptr; }
     virtual DroneSE*            GetDroneSE()            { return nullptr; }
@@ -212,6 +214,7 @@ public:
     virtual bool                IsWreckSE()             { return false; }
     virtual bool                IsMissileSE()           { return false; }
     virtual bool                IsShipSE()              { return false; }
+    virtual bool                IsAIShipSE()            { return false; }
     virtual bool                IsConcord()             { return false; }
     virtual bool                IsDungeonEditSE()       { return false; }
 

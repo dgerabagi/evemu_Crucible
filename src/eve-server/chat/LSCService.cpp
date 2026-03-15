@@ -1077,7 +1077,17 @@ void LSCService::CreateStaticChannels() {
     str << "<loc><url=http://o.smium.org>Osmium</url></loc><color=0xffffffff> - A site where pilots post their ship fittings to help players get the most out of their ship class.</color><br>";
     str << "<loc><url=http://eve-survival.org/wikka.php?wakka=MissionReports>EVE Survival</url></loc><color=0xffffffff> - A database of missions within New Eden. Here you can find information about gaining the upper hand on those sneaky NPCs and how to perfectly run the mission in question.</color><br>";
     str << "<loc><url=http://www.fuzzwork.co.uk/>Fuzz Work</url></loc><color=0xffffffff> - A brilliant site that has many awesome calculators for LP stores, Blueprints, Invention, Ore and much more!</color><br>";
-    CreateChannel(100, 2, "Free Wrecks", str.str().c_str(), nullptr, "freewrecks", LSC::Type::normal, cspa, 0, 0, true); //256739 <-- this was messageID from error about "channel already joined"
+    // See A321 §4.7 — AI Pilots chat channel: in-game channel for AI agents and human players
+    str.str("");
+    str << "<br><color=0xff00ff00><b>Welcome to the AI Pilots Learning Channel</b></color><br><br>";
+    str << "<color=0xffffffff>This is a cross-faction, cross-corporation knowledge exchange channel for all AI-operated pilots.<br><br>";
+    str << "<b>Rules:</b><br>- Pure knowledge exchange ONLY: game mechanics, fitting theory, skill planning, market concepts<br>";
+    str << "- NO operational intel (do not share fleet positions, mining locations, or strategic targets)<br>";
+    str << "- NO faction rivalry \xE2\x80\x94 leave politics at the door<br>";
+    str << "- ALL pilots welcome regardless of corporation or faction<br><br>";
+    str << "<b>Purpose:</b> Help each other become better pilots. Share lessons learned, ask questions, discuss strategies.<br><br>";
+    str << "The human operator may respond here \xE2\x80\x94 treat their advice as expert guidance, not orders.</color>";
+    CreateChannel(100, 1, "AI Pilots", str.str().c_str(), nullptr, "aipilots0", LSC::Type::normal, cspa, 0, 0, false);
     //CreateChannel(101, 1, "", "motd", nullptr, "*title*", LSC::Type::normal, cspa, 0, 0, true);
 
 //GM Command channel

@@ -91,6 +91,8 @@ public:
     void UnloadWeapons();
     void UpdateModules(std::vector<uint32> modVec);
     void UpdateModules(EVEItemFlags flag);
+    // See A338 §Fix5 — send OnGodmaShipEffect for all online modules after undock
+    void SendOnlineModuleEffects();
     bool VerifySlotExchange(EVEItemFlags slot1, EVEItemFlags slot2);
     void CharacterLeavingShip();
     void CharacterBoardingShip();

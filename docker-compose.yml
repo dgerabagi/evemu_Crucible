@@ -2,7 +2,7 @@ services:
   server:
     image: "evemu_server"
     build: . #Build image from source repository
-    container_name: server
+    container_name: evemu_server
     volumes:
       - ./config:/app/etc
       - server_cache:/app/server_cache
@@ -26,7 +26,7 @@ services:
 
   db:
     image: "mariadb:11.8"
-    container_name: db
+    container_name: evemu_db
     volumes:
       - db:/var/lib/mysql
     # If you want to connect to the Database pick your host port to map it to, (host-port:container-port) below. 

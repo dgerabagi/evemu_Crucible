@@ -31,6 +31,10 @@ MarketBotConf::MarketBotConf()
     main.OrderLifetime = 5/*d*/;//N
     main.OrdersPerRefresh = 10;//N
     main.MaxISKPerOrder = 1500000000;//N
+    // See A329 §3.2 — economy reform price multipliers
+    main.BuyPriceMultiplier = 1.0f;
+    main.SellPriceMultiplier = 5.0f;
+    main.SystemsPerCycle = 10;
 
     // buy
     buy.RegionJumps = 10;//N
@@ -84,6 +88,10 @@ bool MarketBotConf::ProcessMain(const TiXmlElement* ele)
     AddValueParser( "OrderLifetime",            main.OrderLifetime );
     AddValueParser( "OrdersPerRefresh",         main.OrdersPerRefresh );
     AddValueParser( "MaxISKPerOrder",           main.MaxISKPerOrder );
+    // See A329 §3.2 — economy reform config fields
+    AddValueParser( "BuyPriceMultiplier",       main.BuyPriceMultiplier );
+    AddValueParser( "SellPriceMultiplier",      main.SellPriceMultiplier );
+    AddValueParser( "SystemsPerCycle",          main.SystemsPerCycle );
 
     const bool result = ParseElementChildren( ele );
 
@@ -93,6 +101,9 @@ bool MarketBotConf::ProcessMain(const TiXmlElement* ele)
     RemoveParser( "OrderLifetime" );
     RemoveParser( "OrdersPerRefresh" );
     RemoveParser( "MaxISKPerOrder" );
+    RemoveParser( "BuyPriceMultiplier" );
+    RemoveParser( "SellPriceMultiplier" );
+    RemoveParser( "SystemsPerCycle" );
 
     return result;
 }

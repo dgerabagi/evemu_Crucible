@@ -106,6 +106,15 @@ public:
     void LeaveChannel(Client* pClient);
     bool IsJoined(uint32 charID);
 
+    // See A321 §4.7 — Phantom AI character presence in Local chat (no Client* needed)
+    bool JoinChannelAsPhantom(uint32 charID, const std::string& charName, uint32 corpID,
+                              uint32 allianceID, uint32 warFactionID, int64 role);
+    void LeaveChannelAsPhantom(uint32 charID, const std::string& charName, uint32 corpID,
+                               uint32 allianceID, uint32 warFactionID, int64 role);
+    // See A321 §4.7 — AI phantom sends a real in-game chat message (no Client* needed)
+    void SendMessageAsPhantom(uint32 charID, const std::string& charName, uint32 corpID,
+                              uint32 allianceID, int64 role, const char* message);
+
     // this is used for updating joined clients when channel config is changed.
     void UpdateConfig();
 

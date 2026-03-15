@@ -45,6 +45,7 @@ class SystemManager;
 class ProbeSE;
 class PyTuple;
 class EVEServiceManager;
+class AIShipSE; // needs artifact reference.
 class SystemEntity;
 class TargetManager;
 
@@ -75,6 +76,9 @@ public:
     void Close();
     void Process();
     void Shutdown();
+    // See A321 §4.6 — AI command queue processing (Python→C++ bridge)
+    void ProcessAICommandQueue();
+    bool ExecuteAICommand(uint32 charID, const char* command, const char* params, std::string &resultMsg);
     void Add(Client* pClient);
     void Remove(Client* pClient);
     // this must be called AFTER a character is selected, after Client and Character class construction is complete. (need complete data)
@@ -83,6 +87,18 @@ public:
     void RemovePlayer(Client* pClient);
     void AddNPC()                                       { ++m_npcs; }
     void RemoveNPC()                                    { --m_npcs; }
+    // See A321 §4.2 — AI ship entity tracking (charID → AIShipSE*)
+    void AddAIShip(uint32 charID, AIShipSE* pSE)        { m_aiShips[charID] = pSE; }
+    void RemoveAIShip(uint32 charID)                     { m_aiShips.erase(charID); }
+    AIShipSE* FindAIShip(uint32 charID);
+    bool HasAIShip(uint32 charID)                        { return m_aiShips.find(charID) != m_aiShips.end(); }
+
+    // See A321 §4.7 — Phantom player sessions (online presence without TCP)
+    void AddPhantomPlayer(uint32 charID);
+    void RemovePhantomPlayer(uint32 charID);
+    bool IsPhantomPlayer(uint32 charID) const            { return m_phantomPlayers.find(charID) != m_phantomPlayers.end(); }
+    const std::set<uint32>& GetPhantomPlayers() const    { return m_phantomPlayers; }
+
     void SetService(EVEServiceManager* svc)             { m_services = svc; }
 
     // updated to use station guest list instead of full clientlist loop
@@ -174,6 +190,7 @@ private:
     Timer m_stampTimer;
     Timer m_minuteTimer;
     Timer m_targTimer;
+    Timer m_aiCmdTimer;    // See A321 §4.6 — AI command queue poll timer
 
     // connected clients (incomplete client class data)
     //  use this to delete Client*
@@ -191,6 +208,12 @@ private:
     std::unordered_map<SystemEntity*, TargetManager*> m_targMgrs;
     // also running scan probes at sub-hz tics
     std::map<uint32, ProbeSE*> m_probes;
+
+    // See A321 §4.2 — AI ship entities keyed by charID
+    std::map<uint32, AIShipSE*> m_aiShips;
+
+    // See A321 §4.7 — Phantom online presence (charIDs without Client objects)
+    std::set<uint32> m_phantomPlayers;
 
     // make list for corp members and their roles for easy access of notifications etc.
     typedef std::map<Client*, int64> corpRole;

@@ -1766,13 +1766,20 @@ void DestinyManager::WarpUpdate(double currentShipSpeed) {
 
         SetPosition(m_position, true);
     } else {
+        // See A334 §2.9 — During mid-warp deceleration, avoid creating new bubbles
+        // for every transient position. Use FindBubble (find-only) first. Only fall
+        // back to GetBubble (find-or-create) if no existing bubble covers this position.
+        // This prevents bubble ID inflation (previously 97+ bubbles per system per session).
+        SystemBubble* midWarpSystemBubble(sBubbleMgr.FindBubble(mySE->SystemMgr()->GetID(), m_position));
+        if (midWarpSystemBubble == nullptr)
+            midWarpSystemBubble = sBubbleMgr.GetBubble(mySE->SystemMgr(), m_position);
         _log(
             DESTINY__WARP_TRACE,
-            "Destiny::WarpUpdate()  %s(%u): adding to midWarpSystemBubble.",
+            "Destiny::WarpUpdate()  %s(%u): adding to midWarpSystemBubble %u.",
             mySE->GetName(),
-            mySE->GetID()
+            mySE->GetID(),
+            midWarpSystemBubble->GetID()
         );
-        SystemBubble* midWarpSystemBubble(sBubbleMgr.GetBubble(mySE->SystemMgr(), m_position));
         midWarpSystemBubble->Add(mySE);
     }
 }
@@ -1806,6 +1813,19 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
     // forward while decelerating - meaning that the client and server are
     // briefly out of sync because the server thinks the ship is halted.
     Halt();
+
+    // See A334 §2.7 — Halt() resets internal state but sends NO client updates.
+    // Without this broadcast, observers who tracked the warp via CmdWarpTo never
+    // receive the "warp ended" signal and see the entity stuck at a stale position.
+    if (mySE->SysBubble() != nullptr) {
+        CmdStop du;
+            du.entityID = mySE->GetID();
+        PyTuple *up = du.Encode();
+        SendSingleDestinyUpdate(&up);
+        PyDecRef(up);
+        // Broadcast final landing position to override client warp interpolation error
+        SetPosition(m_position, true);
+    }
 }
 
 //called whenever an entity is going away and can no longer be used as a target

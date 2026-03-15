@@ -249,13 +249,25 @@ SystemBubble* BubbleManager::FindBubble(uint32 systemID, const GPoint &pos) cons
     _log(DESTINY__BUBBLE_DEBUG, "BubbleManager::FindBubble() - Searching point %.1f, %.1f, %.1f in system %u.", \
                 pos.x, pos.y, pos.z, systemID);
 
+    // See A334 §2.9 — FindBubble must prioritize belt/gate bubbles.
+    // When mid-warp ephemeral bubbles overlap with a belt/gate bubble,
+    // the unordered_multimap iteration order is non-deterministic and may
+    // return the wrong bubble. This causes ships warping to a belt to land
+    // in a plain bubble instead of the belt bubble, making asteroids invisible.
+    SystemBubble* pFallback = nullptr;
     auto range = m_sysBubbleMap.equal_range(systemID);
-    for ( auto itr = range.first; itr != range.second; ++itr )
-        if (itr->second->InBubble(pos))
-            return itr->second;
+    for ( auto itr = range.first; itr != range.second; ++itr ) {
+        if (itr->second->InBubble(pos)) {
+            // If this is a belt or gate bubble, return it immediately — these are authoritative
+            if (itr->second->IsBelt() or itr->second->IsGate())
+                return itr->second;
+            // Otherwise remember the first plain bubble as fallback
+            if (pFallback == nullptr)
+                pFallback = itr->second;
+        }
+    }
 
-    //not in any existing bubble.
-    return nullptr;
+    return pFallback;  // nullptr if no bubble contains the position
 }
 
 SystemBubble* BubbleManager::GetBubble(SystemManager* sysMgr, const GPoint& pos)

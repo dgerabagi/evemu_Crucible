@@ -139,6 +139,8 @@ public:
     void GetEntities(std::map< uint32, SystemEntity* >& into) const;    // this one only sends visible entities
     /* for ??? */
     void GetAllEntities(std::map< uint32, SystemEntity* >& into) const; // this one gets all entities regardless of visibility
+    /* for AI overview — includes static entities (asteroids, stations, gates) */
+    void GetStaticEntities(std::map< uint32, SystemEntity* >& into) const;
     /* for targeting purposes */
     void GetPlayers(std::vector<Client*> &into) const;
     /* for scanning */

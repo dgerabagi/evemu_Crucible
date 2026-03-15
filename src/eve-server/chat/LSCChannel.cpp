@@ -210,6 +210,17 @@ void LSCChannel::SendMessage(Client * c, const char * message, bool self/*false*
 
     PyTuple *answer = sm.Encode();
     sEntityList.Multicast("OnLSC", GetTypeString(), &answer, mct);
+
+    // See A321 §4.7 — Persist messages on AI channel so Python agents can read them
+    if (m_channelID == 100) {
+        std::string escapedName, escapedMsg;
+        sDatabase.DoEscapeString(escapedName, std::string(c->GetName()));
+        sDatabase.DoEscapeString(escapedMsg, std::string(message));
+        DBerror err;
+        sDatabase.RunQuery(err,
+            "INSERT INTO ai_pilot_messages (channelID, senderID, senderName, message) VALUES (%u, %u, '%s', '%s')",
+            m_channelID, c->GetCharacterID(), escapedName.c_str(), escapedMsg.c_str());
+    }
 }
 
 void LSCChannel::SendServerMOTD(Client* pClient) {
@@ -246,6 +257,124 @@ void LSCChannel::SendServerMOTD(Client* pClient) {
 
 bool LSCChannel::IsJoined(uint32 charID) {
     return (m_chars.find(charID) != m_chars.end());
+}
+
+// See A321 §4.7 — Phantom AI character joins Local chat without a Client object
+bool LSCChannel::JoinChannelAsPhantom(uint32 charID, const std::string& charName, uint32 corpID,
+                                       uint32 allianceID, uint32 warFactionID, int64 role)
+{
+    if (m_chars.find(charID) != m_chars.end())
+        return false;  // already joined
+
+    m_chars.insert(
+        std::make_pair(
+            charID,
+            LSCChannelChar(this, corpID, charID, charName, allianceID, warFactionID, role, 0,
+                           LSC::Mode::chConversationalist)
+        )
+    );
+
+    // Build sender info for the join notification
+    OnLSC_SenderInfo *sender = new OnLSC_SenderInfo;
+        sender->senderID = charID;
+        sender->senderName = charName;
+        sender->senderType = 1378;  // character typeID
+        sender->corpID = corpID;
+        sender->role = role;
+        sender->corp_role = 0;
+        sender->allianceID = allianceID;
+        sender->factionID = warFactionID;
+
+    OnLSC_JoinChannel join;
+        join.sender = sender;
+        join.member_count = (int32)m_chars.size();
+        join.channelID = EncodeID();
+
+    MulticastTarget mct;
+    for (auto cur = m_chars.begin(); cur != m_chars.end(); ++cur)
+        mct.characters.insert(cur->first);
+
+    PyTuple *answer = join.Encode();
+    sEntityList.Multicast("OnLSC", GetTypeString(), &answer, mct);
+
+    _log(LSC__CHANNELS, "Phantom %s (%u) Joined Channel %u - %s", charName.c_str(), charID, m_channelID, m_displayName.c_str());
+    return true;
+}
+
+// See A321 §4.7 — Phantom AI character leaves Local chat
+void LSCChannel::LeaveChannelAsPhantom(uint32 charID, const std::string& charName, uint32 corpID,
+                                        uint32 allianceID, uint32 warFactionID, int64 role)
+{
+    if (m_chars.find(charID) == m_chars.end())
+        return;
+
+    m_chars.erase(charID);
+
+    MulticastTarget mct;
+    for (auto cur = m_chars.begin(); cur != m_chars.end(); ++cur)
+        mct.characters.insert(cur->first);
+
+    OnLSC_SenderInfo *sender = new OnLSC_SenderInfo;
+        sender->senderID = charID;
+        sender->senderName = charName;
+        sender->senderType = 1378;
+        sender->corpID = corpID;
+        sender->role = role;
+        sender->corp_role = 0;
+        sender->allianceID = allianceID;
+        sender->factionID = warFactionID;
+
+    OnLSC_LeaveChannel leave;
+        leave.sender = sender;
+        leave.member_count = (int32)m_chars.size();
+        leave.channelID = EncodeID();
+
+    PyTuple *answer = leave.Encode();
+    sEntityList.Multicast("OnLSC", GetTypeString(), &answer, mct);
+
+    _log(LSC__CHANNELS, "Phantom %s (%u) Left Channel %u - %s", charName.c_str(), charID, m_channelID, m_displayName.c_str());
+}
+
+// See A321 §4.7 — AI phantom sends a real in-game chat message (no Client* needed)
+void LSCChannel::SendMessageAsPhantom(uint32 charID, const std::string& charName, uint32 corpID,
+                                       uint32 allianceID, int64 role, const char* message)
+{
+    // Build multicast target: all channel members
+    MulticastTarget mct;
+    for (auto itr = m_chars.begin(); itr != m_chars.end(); ++itr)
+        mct.characters.insert(itr->first);
+
+    // Build sender info for the phantom character
+    OnLSC_SenderInfo *sender = new OnLSC_SenderInfo;
+        sender->senderID = charID;
+        sender->senderName = charName;
+        sender->senderType = 1378;  // character typeID
+        sender->corpID = corpID;
+        sender->role = role;
+        sender->corp_role = 0;
+        sender->allianceID = allianceID;
+        sender->factionID = 0;
+
+    OnLSC_SendMessage sm;
+        sm.sender = sender;
+        sm.channelID = EncodeID();
+        sm.message = message;
+        sm.member_count = m_chars.size();
+
+    PyTuple *answer = sm.Encode();
+    sEntityList.Multicast("OnLSC", GetTypeString(), &answer, mct);
+
+    // Also persist to ai_pilot_messages so Python agents can read it
+    std::string escapedName, escapedMsg;
+    sDatabase.DoEscapeString(escapedName, charName);
+    sDatabase.DoEscapeString(escapedMsg, std::string(message));
+    DBerror err;
+    sDatabase.RunQuery(err,
+        "INSERT INTO ai_pilot_messages (channelID, senderID, senderName, message) VALUES (%u, %u, '%s', '%s')",
+        m_channelID, charID, escapedName.c_str(), escapedMsg.c_str());
+
+    _log(LSC__CHANNELS, "Phantom %s (%u) sent message to Channel %u - %s: %.80s",
+         charName.c_str(), charID, m_channelID, m_displayName.c_str(), message);
 }
 
 void LSCChannel::UpdateConfig()
