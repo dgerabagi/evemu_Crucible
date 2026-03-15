@@ -24,6 +24,7 @@
 
 #include "eve-server.h"
 #include "../../eve-common/EVE_Missions.h"
+#include "../../eve-common/EVE_Dungeon.h"
 //#include "../../eve-common/EVE_Skills.h"
 #include "../../eve-common/EVE_Standings.h"
 
@@ -724,17 +725,28 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
 
     objectiveData->SetItemString("objectives", GetMissionObjectives(pClient, offer));
     PyList* dunList = new PyList();  // this is a list of dunData dicts
-    /*
-    PyDict* dunData = new PyDict();
-        dunData->SetItemString("dungeonID", new PyInt(1000));
-        dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Started));
-        dunData->SetItemString("optional", new PyInt());
-        dunData->SetItemString("briefingMessage", new PyInt());
-        dunData->SetItemString("objectiveCompleted", new PyBool(false));
-        dunData->SetItemString("ownerID", new PyInt(m_agent->GetID()));
-        dunData->SetItemString("shipRestrictions", new PyInt(0));   // 0=normal 1=special with link to *something else*
-        dunData->SetItemString("location", m_agent->GetLocationWrap());
-    */
+    // See A371 — Populate dungeon entry for encounter missions
+    if (offer.typeID == Mission::Type::Encounter) {
+        PyDict* dunData = new PyDict();
+            dunData->SetItemString("dungeonID", new PyInt(offer.dungeonLocationID ? offer.dungeonLocationID : offer.missionID));
+            if (pClient->IsMissionComplete(offer)) {
+                dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Completed));
+                dunData->SetItemString("objectiveCompleted", new PyBool(true));
+            } else {
+                dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Started));
+                dunData->SetItemString("objectiveCompleted", new PyBool(false));
+            }
+            dunData->SetItemString("optional", new PyInt(0));
+            dunData->SetItemString("briefingMessage", new PyInt(offer.briefingID));
+            dunData->SetItemString("ownerID", new PyInt(m_agent->GetID()));
+            dunData->SetItemString("shipRestrictions", new PyInt(0));
+        PyDict* dunLoc = new PyDict();
+            dunLoc->SetItemString("locationID", new PyInt(offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationID));
+            dunLoc->SetItemString("solarsystemID", new PyInt(offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationSystemID));
+            dunLoc->SetItemString("referringAgentID", new PyInt(offer.agentID));
+            dunData->SetItemString("location", dunLoc);
+        dunList->AddItem(dunData);
+    }
     objectiveData->SetItemString("dungeons", dunList);
     /* dunData data....
      * dungeonID
@@ -806,7 +818,22 @@ PyTuple* AgentBound::GetMissionObjectives(Client* pClient, MissionOffer& offer)
                 objType->SetItem(1, objData);
             objectives->SetItem(0, objType);
         } break;
-        case Mission::Type::Encounter:
+        case Mission::Type::Encounter: {
+            // See A371 — Encounter missions: no fetch/cargo objective.
+            // The dungeon entry (populated in GetMissionObjectiveInfo) provides the location.
+            // Show "report to agent" objective so player knows to return after clearing.
+            PyDict* agentLoc = new PyDict();
+                agentLoc->SetItemString("typeID", new PyInt(m_agent->GetLocTypeID()));
+                agentLoc->SetItemString("locationID", new PyInt(offer.destinationID));
+                agentLoc->SetItemString("solarsystemID", new PyInt(offer.destinationSystemID));
+            PyTuple* objData = new PyTuple(2);
+                objData->SetItem(0, new PyInt(offer.agentID));
+                objData->SetItem(1, agentLoc);
+            PyTuple* objType = new PyTuple(2);
+                objType->SetItem(0, new PyString("agent"));
+                objType->SetItem(1, objData);
+            objectives->SetItem(0, objType);
+        } break;
         case Mission::Type::Mining: {
             PyDict* cargo = new PyDict();
                 cargo->SetItemString("hasCargo", new PyBool(pClient->ContainsTypeQty(offer.courierTypeID, offer.courierAmount)));
