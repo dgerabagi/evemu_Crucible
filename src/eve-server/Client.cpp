@@ -1819,6 +1819,18 @@ bool Client::IsMissionComplete(MissionOffer& data)
         case Mission::Type::Tutorial: {
         } break;
         case Mission::Type::Encounter: {
+            // See A371 §Phase3 (Encounter mission completion — all NPCs killed)
+            // Mission is complete when the mission bubble has no more NPCs
+            if (data.dungeonLocationID > 0) {
+                SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(data.dungeonLocationID);
+                if (pBubble != nullptr) {
+                    if (pBubble->CountNPCs() < 1)
+                        return true;
+                } else {
+                    // Bubble was cleaned up — NPCs are gone, mission is complete
+                    return true;
+                }
+            }
         } break;
         case Mission::Type::Courier: {
             if (m_locationID == data.destinationID)

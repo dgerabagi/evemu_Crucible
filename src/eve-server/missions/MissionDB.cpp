@@ -39,6 +39,16 @@ void MissionDB::LoadMiningData(DBQueryResult& res)
         codelog(DATABASE__ERROR, "Error in LoadMiningData query: %s", res.error.c_str());
 }
 
+// See A371 §Phase1 (Encounter data loading from qstEncounter)
+void MissionDB::LoadEncounterData(DBQueryResult& res)
+{
+    if (!sDatabase.RunQuery(res,
+        "SELECT id, briefingID, name, level, typeID, important, storyline, rewardISK, rewardItemID,"
+        " rewardItemQty, bonusISK, bonusTime, sysRange, raceID, npcCount, dungeonID, npcGroupID"
+        " FROM qstEncounter WHERE briefingID > 0 AND rewardISK > 0"))
+        codelog(DATABASE__ERROR, "Error in LoadEncounterData query: %s", res.error.c_str());
+}
+
 void MissionDB::CreateOfferID(MissionOffer& data)
 {
     DBerror err;

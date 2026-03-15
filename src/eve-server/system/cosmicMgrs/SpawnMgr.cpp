@@ -283,14 +283,15 @@ void SpawnMgr::SpawnKilled(SystemBubble* pBubble, uint32 itemID)
          */
     } else if (pBubble->IsMission()) {
         _log(SPAWN__DEPOP, "SpawnMgr::SpawnKilled::Mission - called by %u.", itemID);
-        // placeholder - not coded yet.
-        /*  this needs to deal with multiple things.
-         * 1- unlocking warp gates when needed per wave
-         * 2- dropping loot according to (wave/mission/template)?
-         * 3- setting mission completion status
-         * 4- spawn next wave, if applicable
-         * 5- more/others?
-         */
+        // See A371 §Phase3 (Mission kill tracking and completion)
+        RemoveSpawn(pBubble->GetID(), itemID);
+        if (pBubble->CountNPCs() < 1) {
+            // All mission NPCs destroyed — mission objective complete
+            _log(SPAWN__DEPOP, "SpawnMgr::SpawnKilled - Mission spawn destroyed in bubble %u. Mission objective complete.", pBubble->GetID());
+            m_spawns.erase(pBubble->GetID());
+            m_bubbles.erase(std::find(m_bubbles.begin(), m_bubbles.end(), pBubble));
+            pBubble->SetMission(false);
+        }
     } else if (pBubble->IsIncursion()) {
         _log(SPAWN__DEPOP, "SpawnMgr::SpawnKilled::Incursion - called by %u.", itemID);
         // placeholder - not coded yet.
@@ -430,21 +431,93 @@ void SpawnMgr::DoSpawnForIncursion(SystemBubble* pBubble, uint32 regionID)
     // unknown parameters at this time
 }
 
-void SpawnMgr::DoSpawnForMission(SystemBubble* pBubble, uint32 regionID)
+// See A371 §Phase2 (Mission NPC spawning — adapted from DoSpawnForAnomaly pattern)
+void SpawnMgr::DoSpawnForMission(SystemBubble* pBubble, uint32 factionID, uint32 npcGroupID, uint8 npcCount)
 {
     if (pBubble == nullptr)
         return;
-    if (!IsRegionID(regionID))
-        return;
-    pBubble->SetMission();
-    // unknown parameters at this time
+    if (npcCount == 0)
+        npcCount = 3;
 
-    /*  this needs to deal with multiple things.
-     * 1- npc types per template
-     * 2- faction per template
-     * 3- waves per template.
-     * 4- more/others?
-     */
+    pBubble->SetMission();
+
+    _log(SPAWN__MESSAGE, "SpawnMgr::DoSpawnForMission() - Spawning %u NPCs from group %u for mission in bubble %u.",
+            npcCount, npcGroupID, pBubble->GetID());
+
+    GPoint startPos(pBubble->GetCenter());
+    uint32 corpID = sDataMgr.GetFactionCorp(factionID);
+    FactionData data = FactionData();
+        data.allianceID = factionID;
+        data.corporationID = corpID;
+        data.factionID = (factionID == factionRogueDrones ? 0 : factionID);
+        data.ownerID = corpID;
+
+    // Query random NPC typeIDs from the specified group
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT typeID FROM invTypes WHERE groupID = %u ORDER BY RAND() LIMIT %u",
+        npcGroupID, npcCount))
+    {
+        _log(SPAWN__ERROR, "DoSpawnForMission() - Failed to query NPC types for groupID %u.", npcGroupID);
+        return;
+    }
+
+    NPC* pNPC(nullptr);
+    InventoryItemRef iRef(nullptr);
+    DBResultRow row;
+    uint8 spawned = 0;
+    while (res.GetRow(row)) {
+        uint32 typeID = row.GetInt(0);
+        // Spread NPCs around the bubble center
+        GPoint npcPos(startPos);
+        npcPos.MakeRandomPointOnSphere(MakeRandomInt(5, 20) * 1000); // 5-20km from center
+
+        ItemData idata(typeID, corpID, m_system->GetID(), flagNone, "", npcPos, "MissionRat");
+        iRef = sItemFactory.SpawnItem(idata);
+        if (iRef.get() == nullptr) {
+            _log(SPAWN__ERROR, "DoSpawnForMission() - Failed to spawn item type %u.", typeID);
+            continue;
+        }
+
+        _log(SPAWN__POP, "SpawnMgr::DoSpawnForMission - Spawning NPC type %u (%u)", typeID, iRef->itemID());
+
+        pNPC = new NPC(iRef, m_services, m_system, data, this);
+        if (pNPC == nullptr)
+            continue;
+
+        if (!pNPC->Load()) {
+            _log(SPAWN__ERROR, "DoSpawnForMission() - Failed to load NPC %u (type %u), depoping.", pNPC->GetID(), typeID);
+            pNPC->Delete();
+            continue;
+        }
+
+        m_system->AddNPC(pNPC);
+        pNPC->DestinyMgr()->SetPosition(npcPos);
+
+        // Track the spawn for kill detection
+        SpawnEntry se = SpawnEntry();
+        se.enabled = false;
+        se.groupID = iRef->type().groupID();
+        se.itemID = iRef->itemID();
+        se.total = npcCount;
+        se.number = ++spawned;
+        se.typeID = typeID;
+        se.spawnID = m_spawnID;
+        se.corpID = corpID;
+        se.factionID = factionID;
+        se.spawnClass = Spawn::Class::None;
+        se.spawnGroup = 0;
+        se.level = 1;
+        se.stamp = sEntityList.GetStamp();
+        m_spawns.emplace(pBubble->GetID(), se);
+    }
+
+    ++m_spawnID;
+    if (spawned > 0)
+        m_bubbles.push_back(pBubble);
+
+    _log(SPAWN__TRACE, "DoSpawnForMission() completed: spawned %u/%u NPCs in bubble %u.",
+            spawned, npcCount, pBubble->GetID());
 }
 
 bool SpawnMgr::DoSpawnForBubble(SystemBubble* pBubble)

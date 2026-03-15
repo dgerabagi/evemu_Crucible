@@ -42,7 +42,8 @@ public:
 
     bool DoSpawnForBubble(SystemBubble* pBubble);
     void DoSpawnForAnomaly(SystemBubble* pBubble, GPoint pos, uint8 level, uint16 typeID);
-    void DoSpawnForMission(SystemBubble* pBubble, uint32 regionID);
+    // See A371 §Phase2 (Mission NPC spawning)
+    void DoSpawnForMission(SystemBubble* pBubble, uint32 factionID, uint32 npcGroupID, uint8 npcCount);
     void DoSpawnForIncursion(SystemBubble* pBubble, uint32 regionID);
 
     // primitive test for chained spawns

@@ -34,6 +34,9 @@
 #include "../Client.h"
 #include "../fleet/FleetService.h"
 #include "../system/SystemManager.h"
+#include "../system/SystemBubble.h"
+#include "../system/BubbleManager.h"
+#include "../system/cosmicMgrs/SpawnMgr.h"
 #include "../standing/StandingMgr.h"
 #include "corporation/LPService.h"
 
@@ -63,10 +66,117 @@ bool Agent::Load() {
     return true;
 }
 
+// See A371 §Phase2 (Encounter mission setup — spawns NPCs on mission accept)
+void Agent::SetupEncounterMission(MissionOffer& offer)
+{
+    SystemManager* pSysMgr = sEntityList.FindOrBootSystem(m_agentData.solarSystemID);
+    if (pSysMgr == nullptr) {
+        _log(AGENT__ERROR, "Agent %u: Could not boot system %u for encounter mission.", m_agentID, m_agentData.solarSystemID);
+        return;
+    }
+
+    SpawnMgr* pSpawnMgr = pSysMgr->GetSpawnMgr();
+    if (pSpawnMgr == nullptr) {
+        _log(AGENT__ERROR, "Agent %u: SpawnMgr null for system %u.", m_agentID, m_agentData.solarSystemID);
+        return;
+    }
+
+    // Create a random mission pocket position 1-4 AU from the center of the system
+    GPoint missionPos(0, 0, 0);
+    missionPos.MakeRandomPointOnSphere(MakeRandomInt(1, 4) * ONE_AU_IN_METERS);
+
+    // Get or create a bubble at the mission position
+    SystemBubble* pBubble = sBubbleMgr.GetBubble(pSysMgr, missionPos);
+    if (pBubble == nullptr) {
+        _log(AGENT__ERROR, "Agent %u: Could not create/find bubble for mission pocket.", m_agentID);
+        return;
+    }
+
+    // Retrieve npcGroupID and npcCount from the encounter data
+    uint32 npcGroupID = offer.dungeonLocationID;  // we stored dungeonID here temporarily during CreateMissionOffer
+    uint8 npcCount = 3;  // default
+    // Look up the encounter data to get npcCount
+    EncounterData eData;
+    if (sMissionDataMgr.GetEncounterData(offer.missionID, offer.typeID, m_agentData.level, eData)) {
+        npcGroupID = eData.npcGroupID;
+        npcCount = eData.npcCount;
+    }
+    if (npcGroupID == 0)
+        npcGroupID = 818;  // fallback: Mission Generic Frigates
+
+    // Spawn the NPCs
+    pSpawnMgr->DoSpawnForMission(pBubble, m_agentData.factionID, npcGroupID, npcCount);
+
+    // Update the offer with the actual dungeon location
+    offer.dungeonLocationID = pBubble->GetID();
+    offer.dungeonSolarSystemID = m_agentData.solarSystemID;
+
+    _log(AGENT__MESSAGE, "Agent %u: Setup encounter mission '%s' in bubble %u, system %u, %u NPCs from group %u.",
+            m_agentID, offer.name.c_str(), pBubble->GetID(), m_agentData.solarSystemID, npcCount, npcGroupID);
+}
+
+// See A371 §Phase0 (Division-based mission type selection)
+// Returns mission type based on agent division using EVE Online's published ratios
+uint8 Agent::GetMissionTypeForDivision()
+{
+    // Division ratios: {Kill%, Courier%, Trade%, Mining%}
+    // Kill maps to Mission::Type::Encounter, Courier to Courier, Trade to Trade, Mining to Mining
+    uint8 kill = 0, courier = 0, trade = 0, mining = 0;
+    switch (m_agentData.divisionID) {
+        case Agents::Division::Accounting:          kill=0;  courier=88; trade=12; mining=0;  break;
+        case Agents::Division::Administration:      kill=47; courier=47; trade=6;  mining=0;  break;
+        case Agents::Division::Advisory:            kill=14; courier=58; trade=14; mining=14; break;
+        case Agents::Division::Archives:            kill=0;  courier=92; trade=8;  mining=0;  break;
+        case Agents::Division::Astrosurveying:      kill=13; courier=25; trade=13; mining=50; break; // note: divisionID 5 skips to Astrosurveying
+        case Agents::Division::Command:             kill=88; courier=6;  trade=6;  mining=0;  break;
+        case Agents::Division::Distribution:        kill=5;  courier=85; trade=5;  mining=5;  break;
+        case Agents::Division::Financial:           kill=12; courier=70; trade=18; mining=0;  break;
+        case Agents::Division::Intelligence:        kill=74; courier=21; trade=5;  mining=0;  break;
+        case Agents::Division::InternalSecurity:    kill=98; courier=2;  trade=0;  mining=0;  break;
+        case Agents::Division::Legal:               kill=67; courier=27; trade=6;  mining=0;  break;
+        case Agents::Division::Manufacturing:       kill=0;  courier=48; trade=4;  mining=48; break;
+        case Agents::Division::Marketing:           kill=17; courier=77; trade=6;  mining=0;  break;
+        case Agents::Division::Mining:              kill=0;  courier=10; trade=5;  mining=85; break;
+        case Agents::Division::Personnel:           kill=28; courier=66; trade=6;  mining=0;  break;
+        case Agents::Division::Production:          kill=0;  courier=52; trade=13; mining=35; break;
+        case Agents::Division::PublicRelations:     kill=28; courier=66; trade=6;  mining=0;  break;
+        case Agents::Division::RnD:                 kill=0;  courier=50; trade=50; mining=0;  break;
+        case Agents::Division::Security:            kill=94; courier=6;  trade=0;  mining=0;  break;
+        case Agents::Division::Storage:             kill=6;  courier=71; trade=6;  mining=17; break;
+        case Agents::Division::Surveillance:        kill=84; courier=11; trade=5;  mining=0;  break;
+        // New division types — map to closest archetype
+        case Agents::Division::DistributionNew:     kill=5;  courier=85; trade=5;  mining=5;  break;
+        case Agents::Division::MiningNew:           kill=0;  courier=10; trade=5;  mining=85; break;
+        case Agents::Division::SecurityNew:         kill=94; courier=6;  trade=0;  mining=0;  break;
+        default:                                    kill=0;  courier=100; trade=0; mining=0;  break;
+    }
+
+    uint8 roll = MakeRandomInt(1, 100);
+    if (roll <= kill)
+        return Mission::Type::Encounter;
+    else if (roll <= kill + courier)
+        return Mission::Type::Courier;
+    else if (roll <= kill + courier + trade)
+        return Mission::Type::Trade;    // falls back to Courier in CreateMissionOffer (trade not implemented)
+    else
+        return Mission::Type::Mining;
+
+    // unreachable
+    return Mission::Type::Courier;
+}
+
 void Agent::MakeOffer(uint32 charID, MissionOffer& offer)
 {
-    // this will be based on agent type eventually
-    uint8 misionType = Mission::Type::Courier;
+    // See A371 §Phase0 (Division-based mission type selection)
+    uint8 misionType = GetMissionTypeForDivision();
+
+    // If encounter data isn't loaded yet, fall back to Courier
+    if (misionType == Mission::Type::Encounter) {
+        if (!sMissionDataMgr.HasEncounterData(m_agentData.level)) {
+            _log(AGENT__DEBUG, "Agent %u: No encounter data for level %u, falling back to Courier.", m_agentID, m_agentData.level);
+            misionType = Mission::Type::Courier;
+        }
+    }
 
     sMissionDataMgr.CreateMissionOffer(misionType, m_agentData.level, m_agentData.raceID, m_important, offer);
 

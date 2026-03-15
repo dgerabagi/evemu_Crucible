@@ -240,6 +240,10 @@ PyResult AgentBound::DoAction(PyCallArgs &call, std::optional <PyInt*> actionID)
                     iRef->Move(offer.originID, flagHangar, true);
                     sItemFactory.UnsetUsingClient();
                 }
+                // See A371 §Phase2 (Spawn encounter NPCs on mission accept)
+                if (offer.typeID == Mission::Type::Encounter) {
+                    m_agent->SetupEncounterMission(offer);
+                }
                 m_agent->UpdateOffer(pchar->itemID(), offer);
                 m_agent->SendMissionUpdate(call.client, "offer_accepted");
                 agentSays->SetItem(0, new PyInt(m_agent->GetAcceptRsp(pchar->itemID())));

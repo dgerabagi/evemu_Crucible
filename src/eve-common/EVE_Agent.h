@@ -103,7 +103,8 @@ namespace Agents {
         };
     }
 
-/*  see Corp::Division for this data...
+    // See A371 §Phase0 (Combat Mission Implementation — Division-based type selection)
+    // Division ratios: Kill%, Courier%, Trade%, Mining% — used to select mission type
     namespace Division {
         enum {                       //  Kill   Courier Trade   Mining
             Accounting          = 1, //    0%   88%     12%      0%
@@ -127,18 +128,11 @@ namespace Agents {
             Security            = 19, //  94%    6%      0%      0%
             Storage             = 20, //   6%   71%      6%     17%
             Surveillance        = 21, //  84%   11%      5%      0%
-
-            // 724 new agents with one of these new divisions compared to RMR
-            //281 l1
-            //101 l2
-            //112 l3
-            //189 l4
-            //41 l5     (all dID 24)
             DistributionNew     = 22,
             MiningNew           = 23,
             SecurityNew         = 24
         };
-    }*/
+    }
 }
 
 namespace Dialog {

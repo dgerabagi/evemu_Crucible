@@ -45,6 +45,11 @@ public:
     bool HasMission(uint32 charID);
     bool HasMission(uint32 charID, MissionOffer& offer);
 
+    // See A371 §Phase0 (Division-based mission type selection)
+    uint8 GetMissionTypeForDivision();
+    // See A371 §Phase2 (Encounter mission setup on accept)
+    void SetupEncounterMission(MissionOffer& offer);
+
     void MakeOffer(uint32 charID, MissionOffer& offer);
     void GetOffer(uint32 charID, MissionOffer& offer);
     void UpdateOffer(uint32 charID, MissionOffer& offer);
