@@ -741,6 +741,7 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
             dunData->SetItemString("ownerID", new PyInt(m_agent->GetID()));
             dunData->SetItemString("shipRestrictions", new PyInt(0));
         PyDict* dunLoc = new PyDict();
+            dunLoc->SetItemString("typeID", new PyInt(m_agent->GetLocTypeID()));
             dunLoc->SetItemString("locationID", new PyInt(offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationID));
             dunLoc->SetItemString("solarsystemID", new PyInt(offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationSystemID));
             dunLoc->SetItemString("referringAgentID", new PyInt(offer.agentID));
