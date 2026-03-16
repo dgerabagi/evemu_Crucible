@@ -155,11 +155,19 @@ SystemBubble* Agent::EnsureEncounterBubble(MissionOffer& offer)
 
     SetupEncounterMission(offer);
 
-    // Persist the new bubble ID
+    // Persist the new bubble ID — See A371 Bug15: must update BOTH the DB and the
+    // in-memory m_offers map.  Previously only the local copy + DB were updated,
+    // so every subsequent call re-checked the stale bubble ID and re-created endlessly.
     if (offer.dungeonLocationID > 0) {
         SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
         if (pBubble != nullptr) {
             MissionDB::UpdateMissionOffer(offer);
+            // Update the agent's in-memory offer map so future calls see the new bubble ID
+            std::map<uint32, MissionOffer>::iterator itr = m_offers.find(offer.characterID);
+            if (itr != m_offers.end()) {
+                itr->second.dungeonLocationID = offer.dungeonLocationID;
+                itr->second.dungeonSolarSystemID = offer.dungeonSolarSystemID;
+            }
             return pBubble;
         }
     }

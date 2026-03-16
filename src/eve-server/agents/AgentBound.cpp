@@ -1066,9 +1066,16 @@ PyResult AgentBound::WarpToLocation(PyCallArgs &call, PyRep* locationType, PyInt
                 ShipSE* pShip = call.client->GetShipSE();
                 if (pShip != nullptr and pShip->DestinyMgr() != nullptr) {
                     int32 distance = (warpRange != nullptr) ? (int32)warpRange->value() : 0;
-                    pShip->DestinyMgr()->WarpTo(pBubble->GetCenter(), distance);
-                    _log(AGENT__MESSAGE, "Agent %u: Warping %s to mission pocket bubble %u.",
-                            m_agent->GetID(), call.client->GetName(), pBubble->GetID());
+                    GPoint dest = pBubble->GetCenter();
+                    GPoint shipPos = pShip->GetPosition();
+                    double warpDist = shipPos.distance(dest);
+                    // See A371 Bug15/16 — diagnostic logging for warp/position desync
+                    sLog.Cyan("WarpToLocation", "Agent %u: Warping %s to bubble %u (NPCs=%u). "
+                            "Ship at (%.0f,%.0f,%.0f), dest (%.0f,%.0f,%.0f), distance=%.0f m (%.2f AU), stopDist=%d",
+                            m_agent->GetID(), call.client->GetName(), pBubble->GetID(), pBubble->CountNPCs(),
+                            shipPos.x, shipPos.y, shipPos.z, dest.x, dest.y, dest.z,
+                            warpDist, warpDist / ONE_AU_IN_METERS, distance);
+                    pShip->DestinyMgr()->WarpTo(dest, distance);
                 }
             } else {
                 call.client->SendErrorMsg("The mission site could not be found.");
