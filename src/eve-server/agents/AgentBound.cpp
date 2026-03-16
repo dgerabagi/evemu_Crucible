@@ -631,7 +631,8 @@ PyResult AgentBound::GetMissionJournalInfo(PyCallArgs &call, std::optional <PyIn
 
     PyDict* journalInfo = new PyDict();
     journalInfo->SetItemString("contentID", new PyInt(offer.characterID));
-    journalInfo->SetItemString("missionNameID", new PyInt(offer.missionID));
+    // See A371 Bug10 — send mission name as string; PyInt was resolved as locale messageID (wrong title)
+    journalInfo->SetItemString("missionNameID", new PyString(offer.name));
     // See A371 — Use server-side briefingText when client lacks the messageID
     if (!offer.briefingText.empty()) {
         journalInfo->SetItemString("briefingTextID", new PyString(offer.briefingText));
@@ -661,7 +662,8 @@ PyResult AgentBound::GetMissionJournalInfo(PyCallArgs &call, std::optional <PyIn
 PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer)
 {
     PyDict* objectiveData = new PyDict();
-    objectiveData->SetItemString("missionTitleID", new PyInt(offer.missionID));
+    // See A371 Bug10 — send mission name as string; PyInt was resolved as locale messageID (wrong title)
+    objectiveData->SetItemString("missionTitleID", new PyString(offer.name));
     objectiveData->SetItemString("contentID", new PyInt(offer.characterID));
     objectiveData->SetItemString("importantStandings", new PyInt(offer.important));     // boolean integer
     // will need to test for this to set correctly.....
@@ -786,40 +788,40 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
     // See A371 — Populate dungeon entry for encounter missions only after acceptance
     // Before acceptance there is no dungeon instance, so nothing to display.
     if (offer.typeID == Mission::Type::Encounter
-            and offer.stateID >= Mission::State::Accepted
-            and offer.dungeonLocationID > 0) {
-        PyDict* dunData = new PyDict();
-            dunData->SetItemString("dungeonID", new PyInt(offer.dungeonLocationID));
-            if (pClient->IsMissionComplete(offer)) {
-                dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Completed));
-                dunData->SetItemString("objectiveCompleted", new PyBool(true));
-            } else {
-                dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Started));
-                dunData->SetItemString("objectiveCompleted", new PyBool(false));
-            }
-            dunData->SetItemString("optional", new PyInt(0));
-            dunData->SetItemString("ownerID", new PyInt(m_agent->GetID()));
-            dunData->SetItemString("shipRestrictions", new PyInt(0));
-        // See A371 — dungeon location uses solar system + coordinates for warp-to
-        PyDict* dunLoc = new PyDict();
-            uint32 dunSysID = offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationSystemID;
-            dunLoc->SetItemString("locationID", new PyInt(dunSysID));
-            dunLoc->SetItemString("typeID", new PyInt(5));  // typeID 5 = Solar System
-            dunLoc->SetItemString("locationType", new PyString("objective.destination"));
-            dunLoc->SetItemString("solarsystemID", new PyInt(dunSysID));
-            dunLoc->SetItemString("agentID", new PyInt(offer.agentID));
-            // Provide warp-to coordinates from the mission bubble
-            SystemBubble* pMissionBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
-            if (pMissionBubble != nullptr) {
+            and offer.stateID >= Mission::State::Accepted) {
+        // See A371 Bug10 — ensure bubble exists (re-create if lost after restart)
+        SystemBubble* pMissionBubble = m_agent->EnsureEncounterBubble(offer);
+        if (pMissionBubble != nullptr) {
+            PyDict* dunData = new PyDict();
+                dunData->SetItemString("dungeonID", new PyInt(offer.dungeonLocationID));
+                if (pClient->IsMissionComplete(offer)) {
+                    dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Completed));
+                    dunData->SetItemString("objectiveCompleted", new PyBool(true));
+                } else {
+                    dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Started));
+                    dunData->SetItemString("objectiveCompleted", new PyBool(false));
+                }
+                dunData->SetItemString("optional", new PyInt(0));
+                dunData->SetItemString("ownerID", new PyInt(m_agent->GetID()));
+                dunData->SetItemString("shipRestrictions", new PyInt(0));
+            // See A371 — dungeon location uses solar system + coordinates for warp-to
+            PyDict* dunLoc = new PyDict();
+                uint32 dunSysID = offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationSystemID;
+                dunLoc->SetItemString("locationID", new PyInt(dunSysID));
+                dunLoc->SetItemString("typeID", new PyInt(5));  // typeID 5 = Solar System
+                dunLoc->SetItemString("locationType", new PyString("objective.destination"));
+                dunLoc->SetItemString("solarsystemID", new PyInt(dunSysID));
+                dunLoc->SetItemString("agentID", new PyInt(offer.agentID));
+                // Provide warp-to coordinates from the mission bubble
                 GPoint center = pMissionBubble->GetCenter();
                 PyTuple* coords = new PyTuple(3);
                     coords->SetItem(0, new PyFloat(center.x));
                     coords->SetItem(1, new PyFloat(center.y));
                     coords->SetItem(2, new PyFloat(center.z));
                 dunLoc->SetItemString("coords", coords);
-            }
-            dunData->SetItemString("location", dunLoc);
-        dunList->AddItem(dunData);
+                dunData->SetItemString("location", dunLoc);
+            dunList->AddItem(dunData);
+        }
     }
     objectiveData->SetItemString("dungeons", dunList);
     /* dunData data....
@@ -1051,8 +1053,9 @@ PyResult AgentBound::WarpToLocation(PyCallArgs &call, PyInt* locationType, PyInt
     // See A371 — Warp player to encounter mission pocket
     MissionOffer offer = MissionOffer();
     if (m_agent->HasMission(call.client->GetCharacterID(), offer)) {
-        if (offer.typeID == Mission::Type::Encounter and offer.dungeonLocationID > 0) {
-            SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
+        if (offer.typeID == Mission::Type::Encounter) {
+            // See A371 Bug10 — ensure bubble exists (re-create if lost after restart)
+            SystemBubble* pBubble = m_agent->EnsureEncounterBubble(offer);
             if (pBubble != nullptr) {
                 ShipSE* pShip = call.client->GetShipSE();
                 if (pShip != nullptr and pShip->DestinyMgr() != nullptr) {

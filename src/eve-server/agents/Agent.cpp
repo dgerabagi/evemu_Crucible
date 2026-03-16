@@ -115,6 +115,39 @@ void Agent::SetupEncounterMission(MissionOffer& offer)
             m_agentID, offer.name.c_str(), pBubble->GetID(), m_agentData.solarSystemID, npcCount, npcGroupID);
 }
 
+// See A371 Bug10 — re-create encounter bubble if lost after server restart
+SystemBubble* Agent::EnsureEncounterBubble(MissionOffer& offer)
+{
+    if (offer.typeID != Mission::Type::Encounter or offer.stateID < Mission::State::Accepted)
+        return nullptr;
+
+    // Check if existing bubble is still valid
+    if (offer.dungeonLocationID > 0) {
+        SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
+        if (pBubble != nullptr and pBubble->IsMission())
+            return pBubble;  // bubble survived restart — all good
+    }
+
+    // Bubble was lost (server restart recycles IDs). Re-create.
+    _log(AGENT__MESSAGE, "Agent %u: Mission bubble %u lost, re-creating encounter for '%s'.",
+            m_agentID, offer.dungeonLocationID, offer.name.c_str());
+
+    SetupEncounterMission(offer);
+
+    // Persist the new bubble ID
+    if (offer.dungeonLocationID > 0) {
+        SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
+        if (pBubble != nullptr) {
+            MissionDB::UpdateMissionOffer(offer);
+            return pBubble;
+        }
+    }
+
+    _log(AGENT__ERROR, "Agent %u: Failed to re-create encounter bubble for '%s'.",
+            m_agentID, offer.name.c_str());
+    return nullptr;
+}
+
 // See A371 §Phase0 (Division-based mission type selection)
 // Returns mission type based on agent division using EVE Online's published ratios
 uint8 Agent::GetMissionTypeForDivision()

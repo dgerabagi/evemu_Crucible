@@ -1822,13 +1822,15 @@ bool Client::IsMissionComplete(MissionOffer& data)
             // See A371 §Phase3 (Encounter mission completion — all NPCs killed)
             // dungeonLocationID is overwritten with the actual bubble ID on accept.
             // Only return true when we can positively confirm all NPCs are dead.
+            // See A371 Bug10 — after restart, bubble IDs reuse; IsMission() guards against
+            // false positives from gate/station bubbles inheriting the old ID.
             if (data.stateID >= Mission::State::Accepted and data.dungeonLocationID > 0) {
                 SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(data.dungeonLocationID);
-                if (pBubble != nullptr) {
+                if (pBubble != nullptr and pBubble->IsMission()) {
                     if (pBubble->CountNPCs() < 1)
                         return true;
                 }
-                // Bubble nullptr: either cleaned up or not yet registered.
+                // Bubble nullptr or not a mission bubble: dungeon was lost (server restart).
                 // Don't assume complete — require positive NPC kill confirmation.
             }
         } break;

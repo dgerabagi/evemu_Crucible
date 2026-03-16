@@ -17,6 +17,7 @@
 #include "missions/MissionDataMgr.h"
 
 class Client;
+class SystemBubble;
 
 class Agent {
 public:
@@ -49,6 +50,8 @@ public:
     uint8 GetMissionTypeForDivision();
     // See A371 §Phase2 (Encounter mission setup on accept)
     void SetupEncounterMission(MissionOffer& offer);
+    // See A371 Bug10 — re-create encounter bubble if lost after restart
+    SystemBubble* EnsureEncounterBubble(MissionOffer& offer);
 
     void MakeOffer(uint32 charID, MissionOffer& offer);
     void GetOffer(uint32 charID, MissionOffer& offer);
