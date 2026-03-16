@@ -264,25 +264,28 @@ PyResult AgentBound::DoAction(PyCallArgs &call, std::optional <PyInt*> actionID)
                 // See A371 §Phase2 (Spawn encounter NPCs on mission accept)
                 if (offer.typeID == Mission::Type::Encounter) {
                     m_agent->SetupEncounterMission(offer);
-                    // Create a warp-to bookmark for the mission pocket
+                    // See A371 — Create a warp-to bookmark for the mission pocket (util.KeyVal format)
                     if (offer.dungeonLocationID > 0) {
                         SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
                         if (pBubble != nullptr) {
                             GPoint center = pBubble->GetCenter();
-                            PyDict* bm = new PyDict();
-                                bm->SetItemString("agentID", new PyInt(offer.agentID));
-                                bm->SetItemString("locationType", new PyInt(1)); // dungeon
-                                bm->SetItemString("locationNumber", new PyInt(1));
-                                bm->SetItemString("solarsystemID", new PyInt(offer.dungeonSolarSystemID));
-                                bm->SetItemString("locationID", new PyInt(offer.dungeonSolarSystemID));
-                                bm->SetItemString("itemID", new PyInt(offer.dungeonSolarSystemID));
-                                bm->SetItemString("typeID", new PyInt(5));  // solar system type
-                                PyTuple* coords = new PyTuple(3);
-                                    coords->SetItem(0, new PyFloat(center.x));
-                                    coords->SetItem(1, new PyFloat(center.y));
-                                    coords->SetItem(2, new PyFloat(center.z));
-                                bm->SetItemString("coords", coords);
-                            offer.bookmarks->AddItem(bm);
+                            PyDict* bmDict = new PyDict();
+                                bmDict->SetItemString("itemID", new PyInt(offer.dungeonSolarSystemID));
+                                bmDict->SetItemString("typeID", new PyInt(5));  // solar system type
+                                bmDict->SetItemString("agentID", new PyInt(offer.agentID));
+                                bmDict->SetItemString("hint", new PyString("Encounter - " + offer.name));
+                                bmDict->SetItemString("locationType", new PyString("objective.destination"));
+                                bmDict->SetItemString("memo", new PyString(""));
+                                bmDict->SetItemString("created", new PyLong(GetFileTimeNow()));
+                                bmDict->SetItemString("locationNumber", new PyInt(1));
+                                bmDict->SetItemString("flag", PyStatic.NewNone());
+                                bmDict->SetItemString("locationID", new PyInt(offer.dungeonSolarSystemID));
+                                bmDict->SetItemString("ownerID", new PyInt(offer.characterID));
+                                bmDict->SetItemString("solarsystemID", new PyInt(offer.dungeonSolarSystemID));
+                                bmDict->SetItemString("x", new PyFloat(center.x));
+                                bmDict->SetItemString("y", new PyFloat(center.y));
+                                bmDict->SetItemString("z", new PyFloat(center.z));
+                            offer.bookmarks->AddItem(new PyObject("util.KeyVal", bmDict));
                         }
                     }
                 }
