@@ -316,6 +316,12 @@ private:
     bool m_frozen;                      // hack to keep ship from moving when using modules that prevent movement
     bool m_changeDelay;                 // this is to try to sync destiny with client, as client has a delay when changing destiny states.
 
+    // See A371 Bug17 — Post-warp position correction counter.
+    // After WarpStop, broadcast SetBallPosition for this many ticks to
+    // force-sync client position (client may ignore the first one during
+    // its own warp-exit transition).
+    uint8 m_postWarpCorrectionTicks;
+
     // check to align destiny movement to tic
     bool m_ticAlign;
     void SendMovementPacket();

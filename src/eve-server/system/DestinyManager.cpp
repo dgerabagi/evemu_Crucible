@@ -77,6 +77,7 @@ m_targBubble(nullptr),
 m_warpCapacitorNeed(0.00001),
 m_frozen(false),
 m_ticAlign(false),
+m_postWarpCorrectionTicks(0),
 mvPacket(nullptr)
 {
     m_bump = false;
@@ -877,6 +878,16 @@ void DestinyManager::MoveObject() {
     //set velocity and position for this tic
     m_velocity = m_shipHeading * speed;
     SetPosition(m_position + m_velocity, sConfig.debug.PositionHack);   // (PositionHack == true) here will force position update to client
+
+    // See A371 Bug17 — Post-warp position correction.
+    // After WarpStop, broadcast SetBallPosition for several ticks to force the
+    // client to accept the server's authoritative position. The client's C++
+    // destiny module may ignore SetBallPosition during its own warp-exit
+    // transition, so we repeat it until the client is definitely out of warp.
+    if (m_postWarpCorrectionTicks > 0) {
+        --m_postWarpCorrectionTicks;
+        SetPosition(m_position, true);
+    }
 
     if (is_log_enabled(DESTINY__MOVE_DEBUG))
         _log(DESTINY__MOVE_DEBUG, "Destiny::MoveObject() - %s(%u) Pos:%.2f,%.2f,%.2f  Vel:%.3f,%.3f,%.3f  Head:%.3f,%.3f,%.3f", \
@@ -1836,17 +1847,34 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
     // from the last WarpUpdate tick's integer decelTime).
     SetPosition(finalPos);
 
-    // See A334 §2.7 — Halt() resets internal state but sends NO client updates.
-    // Without this broadcast, observers who tracked the warp via CmdWarpTo never
-    // receive the "warp ended" signal and see the entity stuck at a stale position.
+    // See A371 Bug17 — Send effects.Warping deactivation BEFORE CmdStop.
+    // The client's warp visual loop (Warp.py WarpLoop) runs while ball.mode == DSTBALL_WARP.
+    // CmdStop changes ball mode. But without the effect deactivation signal, the client's
+    // FxSequencer may not properly clean up warp state. Sending this first gives the client
+    // the canonical protocol: effect stop → mode change → position correction.
     if (mySE->SysBubble() != nullptr) {
+        std::vector<PyTuple*> updates;
+
+        OnSpecialFX10 sfx;
+            sfx.guid = "effects.Warping";
+            sfx.entityID = mySE->GetID();
+            sfx.isOffensive = false;
+            sfx.start = false;
+            sfx.active = false;
+        updates.push_back(sfx.Encode());
+
         CmdStop du;
             du.entityID = mySE->GetID();
-        PyTuple *up = du.Encode();
-        SendSingleDestinyUpdate(&up);
-        PyDecRef(up);
-        // Broadcast final landing position to override client warp interpolation error
+        updates.push_back(du.Encode());
+
+        SendDestinyUpdate(updates);
+
+        // See A371 Bug17 — Broadcast final landing position to override client warp
+        // interpolation error. Also start a correction timer: send SetBallPosition
+        // for several ticks to ensure the client accepts it (the client may ignore
+        // the first broadcast if it's still transitioning out of warp state).
         SetPosition(m_position, true);
+        m_postWarpCorrectionTicks = 5;
     }
 
     // See A371 Bug16 — Log post-warp final state for verification
