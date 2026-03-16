@@ -236,6 +236,12 @@ void DestinyManager::ProcessState() {
                 if (mySE->HasPilot()) {
                     _log(DESTINY__ERROR, "Destiny::ProcessState() Error!  Ship %s(%u) for Player %s(%u) - warp align/speed is incorrect, but time > shipTimeToWarp.",  \
                                 mySE->GetName(), mySE->GetID(), mySE->GetPilot()->GetName(), mySE->GetPilot()->GetCharacterID());
+                    // See A371 Bug16 — diagnostic: log why alignment timed out
+                    _log(DESTINY__ERROR, "Destiny::ProcessState() AlignDiag: degrees=%.2f (need<%.1f), timeFrac=%.4f (need>0.749), "
+                            "elapsed=%u, timeToWarp=%.1f, agility=%.3f, heading(%.3f,%.3f,%.3f)",
+                            degrees, WARP_ALIGNMENT, m_timeFraction,
+                            sEntityList.GetStamp() - m_stateStamp, m_timeToEnterWarp, m_shipAgility,
+                            m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
                 } else {
                     _log(DESTINY__ERROR, "Destiny::ProcessState() Error!  NPC %s(%u) - warp align/speed is incorrect, but time > shipTimeToWarp.",  \
                             mySE->GetName(), mySE->GetID());
@@ -912,8 +918,12 @@ bool DestinyManager::IsTurn() {    //this is working.  dont change
         Halt();
         return false;
     }
-    // if ship is stopped, there is no turn.  immediately begin movement in desired direction
-    if ((m_timeFraction < 0.1) and (m_activeSpeedFraction < 0.1)) {
+    // if ship is stopped or nearly stopped, there is no turn.  immediately begin movement in desired direction
+    // See A371 Bug16 — Threshold widened from 0.1 to 0.3 so fast-accelerating frigates
+    // (agility ~3.5, timeFraction ~0.25 at first tick) also get the immediate heading snap.
+    // Without this, frigates inherit a stale heading (e.g. warp direction) and spend
+    // 15+ seconds slowly turning while drifting in the wrong direction.
+    if ((m_timeFraction < 0.3) and (m_activeSpeedFraction < 0.3)) {
         GVector toVec(m_position, m_targetPoint);
         toVec.normalize();
         m_shipHeading = toVec;
@@ -1785,17 +1795,27 @@ void DestinyManager::WarpUpdate(double currentShipSpeed) {
 }
 
 void DestinyManager::WarpStop(double currentShipSpeed) {
-    if (is_log_enabled(DESTINY__WARP_TRACE)) {
-        _log(DESTINY__WARP_TRACE, "Destiny::WarpStop(): %s(%u) - Warp complete. Exit velocity %.4f m/s with %.2f m left to go.", \
-                mySE->GetName(), mySE->GetID(), currentShipSpeed, m_targetDistance);
-        _log(DESTINY__WARP_TRACE, "Destiny::WarpStop(): %s(%u): Ship currently at %.2f,%.2f,%.2f.", \
-                mySE->GetName(), mySE->GetID(), m_position.x, m_position.y, m_position.z);
-    }
+    // See A371 Bug16 — Log warp landing state for diagnostics
+    _log(DESTINY__WARNING, "Destiny::WarpStop(): %s(%u) - Warp complete. Exit velocity %.4f m/s, %.2f m remaining.",
+            mySE->GetName(), mySE->GetID(), currentShipSpeed, m_targetDistance);
+    _log(DESTINY__WARNING, "Destiny::WarpStop(): %s(%u): pos(%.0f,%.0f,%.0f) heading(%.3f,%.3f,%.3f)",
+            mySE->GetName(), mySE->GetID(),
+            m_position.x, m_position.y, m_position.z,
+            m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
+
     if (mySE->IsShipSE()) {
         _log(AUTOPILOT__MESSAGE, "Destiny::WarpStop(): %s(%u) - Warp complete.", mySE->GetName(), mySE->GetID());
         mySE->GetPilot()->SetLoginWarpComplete();
     }
-    m_targetPoint += (m_warpState->warp_vector *10000);
+
+    // See A371 Bug16 — Capture warp vector and target before state deletion.
+    // We set the final position precisely to the warp target point minus any
+    // remaining tiny offset, then zero velocity and heading immediately.
+    GPoint finalPos = m_targetPoint;
+    if (m_warpState != nullptr and m_targetDistance > 0)
+        finalPos = m_targetPoint - (m_warpState->warp_vector * m_targetDistance);
+
+    m_targetPoint += (m_warpState->warp_vector * 10000);
     // SetSpeedFraction() checks for m_state = Warp and warpstate != null to set decel variables correctly with warp decel.
     //   have to call this BEFORE deleting or reseting m_state or WarpState.
     SetSpeedFraction(0.0f);
@@ -1806,13 +1826,15 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
         mySE->GetNPCSE()->GetAIMgr()->WarpOutComplete();
     }
 
-    // TODO: when exiting warp, and attempting to warp again shortly after, the
-    // ball mode reaches a weird state where it goes from Warp to a regular
-    // move. Halting the ship after warp completes seems to fix this, but it's
-    // not a good fix, because the client shows that the ship moves a few meters
-    // forward while decelerating - meaning that the client and server are
-    // briefly out of sync because the server thinks the ship is halted.
+    // See A371 Bug16 — Call Halt() to immediately zero ALL movement state.
+    // The previous SetSpeedFraction(0.0) sets up warp-exit decel variables and changes
+    // mode to GOTO, but Halt() immediately overrides everything to a clean STOP state.
     Halt();
+
+    // See A371 Bug16 — Set ship position to the precise warp destination.
+    // Use the calculated finalPos (not m_position, which may have rounding error
+    // from the last WarpUpdate tick's integer decelTime).
+    SetPosition(finalPos);
 
     // See A334 §2.7 — Halt() resets internal state but sends NO client updates.
     // Without this broadcast, observers who tracked the warp via CmdWarpTo never
@@ -1825,6 +1847,17 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
         PyDecRef(up);
         // Broadcast final landing position to override client warp interpolation error
         SetPosition(m_position, true);
+    }
+
+    // See A371 Bug16 — Log post-warp final state for verification
+    if (mySE->SysBubble() != nullptr) {
+        double distFromCenter = mySE->SysBubble()->GetCenter().distance(m_position);
+        _log(DESTINY__WARNING, "Destiny::WarpStop(): %s(%u): FINAL pos(%.0f,%.0f,%.0f) vel(%.1f,%.1f,%.1f) "
+                "bubble=%u distFromCenter=%.0fm mode=%u",
+                mySE->GetName(), mySE->GetID(),
+                m_position.x, m_position.y, m_position.z,
+                m_velocity.x, m_velocity.y, m_velocity.z,
+                mySE->SysBubble()->GetID(), distFromCenter, (uint32)m_ballMode);
     }
 }
 
@@ -1913,7 +1946,15 @@ void DestinyManager::BeginMovement() {
         GVector targHeading(m_position, m_targetPoint);
         targHeading.normalize();
         m_targetHeading = targHeading;
-        if (m_shipHeading.isZero())
+        // See A371 Bug16 — When starting movement from a complete stop (e.g. after warp
+        // landing + Halt()), immediately snap heading to target direction.  Without this,
+        // m_shipHeading retains the stale warp vector and the IsTurn() stopped-ship snap
+        // fails for frigates (they accelerate past the 0.1 threshold within the first
+        // tick).  The ship then flies in the old warp direction for 15+ seconds while
+        // the Turn() system slowly rotates, causing it to drift out of the mission bubble.
+        if ((m_timeFraction < 0.02f) and (m_activeSpeedFraction < 0.02f))
+            m_shipHeading = targHeading;
+        else if (m_shipHeading.isZero())
             m_shipHeading = targHeading;
     }
 
