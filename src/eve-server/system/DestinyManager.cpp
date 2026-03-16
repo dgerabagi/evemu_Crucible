@@ -154,11 +154,23 @@ void DestinyManager::ProcessState() {
     using namespace Destiny;
     switch(m_ballMode) {
         case Ball::Mode::STOP: {
+            // See A371 Bug18 — Post-warp position correction.
+            // After WarpStop, the ship is STOP mode with IsMoving()==false, so MoveObject()
+            // is never called. We broadcast SetBallPosition here to force-sync the client.
+            if (m_postWarpCorrectionTicks > 0) {
+                --m_postWarpCorrectionTicks;
+                SetPosition(m_position, true);
+            }
             if (IsMoving()) {
                 MoveObject();
                 return;
             }
-            Stop();
+            // See A371 Bug18 — Don't call Stop() every tick when already fully stopped.
+            // The original code called Stop() → SetSpeedFraction(0) → UpdateVelocity → Halt()
+            // every tick, spamming CmdStop to the client and resetting m_stateStamp.
+            if (!m_stop) {
+                Stop();
+            }
         } break;
         case Ball::Mode::GOTO: {
             MoveObject();
@@ -879,15 +891,8 @@ void DestinyManager::MoveObject() {
     m_velocity = m_shipHeading * speed;
     SetPosition(m_position + m_velocity, sConfig.debug.PositionHack);   // (PositionHack == true) here will force position update to client
 
-    // See A371 Bug17 — Post-warp position correction.
-    // After WarpStop, broadcast SetBallPosition for several ticks to force the
-    // client to accept the server's authoritative position. The client's C++
-    // destiny module may ignore SetBallPosition during its own warp-exit
-    // transition, so we repeat it until the client is definitely out of warp.
-    if (m_postWarpCorrectionTicks > 0) {
-        --m_postWarpCorrectionTicks;
-        SetPosition(m_position, true);
-    }
+    // Note: post-warp position correction moved to ProcessState STOP handler (Bug 18).
+    // MoveObject is never called for fully stopped ships (after WarpStop → Halt).
 
     if (is_log_enabled(DESTINY__MOVE_DEBUG))
         _log(DESTINY__MOVE_DEBUG, "Destiny::MoveObject() - %s(%u) Pos:%.2f,%.2f,%.2f  Vel:%.3f,%.3f,%.3f  Head:%.3f,%.3f,%.3f", \
@@ -1847,33 +1852,33 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
     // from the last WarpUpdate tick's integer decelTime).
     SetPosition(finalPos);
 
-    // See A371 Bug17 — Send effects.Warping deactivation BEFORE CmdStop.
-    // The client's warp visual loop (Warp.py WarpLoop) runs while ball.mode == DSTBALL_WARP.
-    // CmdStop changes ball mode. But without the effect deactivation signal, the client's
-    // FxSequencer may not properly clean up warp state. Sending this first gives the client
-    // the canonical protocol: effect stop → mode change → position correction.
+    // See A371 Bug18 — Send CmdStop + SetBallPosition in the same destiny update batch.
+    // DO NOT send effects.Warping(stop) — the client's WarpLoop (Warp.py) handles effect
+    // cleanup automatically: when CmdStop changes ball.mode from DSTBALL_WARP, the loop exits
+    // and calls FxSequencer.OnSpecialFX('effects.Warping', 0, 0, 0) itself. Sending a server-side
+    // effects.Warping(stop) causes double-cleanup that crashes the client (stack trace at WarpLoop
+    // line 324 confirmed). Also include SetBallPosition in the same batch so the client gets the
+    // authoritative position correction alongside CmdStop.
     if (mySE->SysBubble() != nullptr) {
         std::vector<PyTuple*> updates;
-
-        OnSpecialFX10 sfx;
-            sfx.guid = "effects.Warping";
-            sfx.entityID = mySE->GetID();
-            sfx.isOffensive = false;
-            sfx.start = false;
-            sfx.active = false;
-        updates.push_back(sfx.Encode());
 
         CmdStop du;
             du.entityID = mySE->GetID();
         updates.push_back(du.Encode());
 
+        SetBallPosition bp;
+            bp.entityID = mySE->GetID();
+            bp.x = m_position.x;
+            bp.y = m_position.y;
+            bp.z = m_position.z;
+        updates.push_back(bp.Encode());
+
         SendDestinyUpdate(updates);
 
-        // See A371 Bug17 — Broadcast final landing position to override client warp
-        // interpolation error. Also start a correction timer: send SetBallPosition
-        // for several ticks to ensure the client accepts it (the client may ignore
-        // the first broadcast if it's still transitioning out of warp state).
-        SetPosition(m_position, true);
+        // See A371 Bug18 — Start a correction timer: broadcast SetBallPosition for several
+        // more ticks from ProcessState to ensure the client accepts the position. The correction
+        // fires in the STOP handler of ProcessState (NOT in MoveObject, which is never called
+        // for fully stopped ships).
         m_postWarpCorrectionTicks = 5;
     }
 
