@@ -85,9 +85,12 @@ void MissionDB::DeleteOffer(MissionOffer& data)
 
 void MissionDB::UpdateMissionOffer(MissionOffer& data)
 {
+    // See A371 — save dungeon data so encounter mission state persists across server restarts
     DBerror err;
-    if (!sDatabase.RunQuery(err, "UPDATE agtOffers SET stateID = %u, dateAccepted = %f, dateCompleted = %f, expiryTime = %f WHERE offerID = %u",
-        data.stateID, data.dateAccepted, data.dateCompleted, data.expiryTime, data.offerID))
+    if (!sDatabase.RunQuery(err, "UPDATE agtOffers SET stateID = %u, dateAccepted = %f, dateCompleted = %f, expiryTime = %f,"
+        " dungeonLocationID = %u, dungeonSolarSystemID = %u WHERE offerID = %u",
+        data.stateID, data.dateAccepted, data.dateCompleted, data.expiryTime,
+        data.dungeonLocationID, data.dungeonSolarSystemID, data.offerID))
     {
         codelog(DATABASE__ERROR, "Failed to update MissionOffer: %s", err.c_str());
     }

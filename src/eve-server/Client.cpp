@@ -1820,18 +1820,16 @@ bool Client::IsMissionComplete(MissionOffer& data)
         } break;
         case Mission::Type::Encounter: {
             // See A371 §Phase3 (Encounter mission completion — all NPCs killed)
-            // Mission must be accepted and have a valid bubble ID (set during SetupEncounterMission)
-            // dungeonLocationID starts as the dungeon template ID and is overwritten with
-            // the actual bubble ID on accept, so only check if mission was accepted.
+            // dungeonLocationID is overwritten with the actual bubble ID on accept.
+            // Only return true when we can positively confirm all NPCs are dead.
             if (data.stateID >= Mission::State::Accepted and data.dungeonLocationID > 0) {
                 SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(data.dungeonLocationID);
                 if (pBubble != nullptr) {
                     if (pBubble->CountNPCs() < 1)
                         return true;
-                } else {
-                    // Bubble was cleaned up — NPCs are gone, mission is complete
-                    return true;
                 }
+                // Bubble nullptr: either cleaned up or not yet registered.
+                // Don't assume complete — require positive NPC kill confirmation.
             }
         } break;
         case Mission::Type::Courier: {

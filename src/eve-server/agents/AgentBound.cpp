@@ -35,6 +35,8 @@
 #include "agents/AgentMgrService.h"
 #include "station/Station.h"
 #include "services/ServiceManager.h"
+#include "system/BubbleManager.h"
+#include "system/SystemBubble.h"
 
 AgentBound::AgentBound(EVEServiceManager& mgr, AgentMgrService& parent, Agent *agt) :
     EVEBoundObject(mgr, parent),
@@ -262,6 +264,27 @@ PyResult AgentBound::DoAction(PyCallArgs &call, std::optional <PyInt*> actionID)
                 // See A371 §Phase2 (Spawn encounter NPCs on mission accept)
                 if (offer.typeID == Mission::Type::Encounter) {
                     m_agent->SetupEncounterMission(offer);
+                    // Create a warp-to bookmark for the mission pocket
+                    if (offer.dungeonLocationID > 0) {
+                        SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
+                        if (pBubble != nullptr) {
+                            GPoint center = pBubble->GetCenter();
+                            PyDict* bm = new PyDict();
+                                bm->SetItemString("agentID", new PyInt(offer.agentID));
+                                bm->SetItemString("locationType", new PyInt(1)); // dungeon
+                                bm->SetItemString("locationNumber", new PyInt(1));
+                                bm->SetItemString("solarsystemID", new PyInt(offer.dungeonSolarSystemID));
+                                bm->SetItemString("locationID", new PyInt(offer.dungeonSolarSystemID));
+                                bm->SetItemString("itemID", new PyInt(offer.dungeonSolarSystemID));
+                                bm->SetItemString("typeID", new PyInt(5));  // solar system type
+                                PyTuple* coords = new PyTuple(3);
+                                    coords->SetItem(0, new PyFloat(center.x));
+                                    coords->SetItem(1, new PyFloat(center.y));
+                                    coords->SetItem(2, new PyFloat(center.z));
+                                bm->SetItemString("coords", coords);
+                            offer.bookmarks->AddItem(bm);
+                        }
+                    }
                 }
                 m_agent->UpdateOffer(pchar->itemID(), offer);
                 m_agent->SendMissionUpdate(call.client, "offer_accepted");
@@ -294,8 +317,12 @@ PyResult AgentBound::DoAction(PyCallArgs &call, std::optional <PyInt*> actionID)
                 /** @todo  add fleet sharing  */
                 if (offer.rewardISK)
                     AccountService::TransferFunds(m_agent->GetID(), pchar->itemID(), offer.rewardISK, "Mission Reward", Journal::EntryType::AgentMissionReward, m_agent->GetID());
-                if ((offer.bonusTime > 0) and (offer.bonusTime < (offer.dateAccepted - GetFileTimeNow())))
-                    AccountService::TransferFunds(m_agent->GetID(), pchar->itemID(), offer.bonusISK, "Mission Bonus Reward", Journal::EntryType::AgentMissionTimeBonusReward, m_agent->GetID());
+                // See A371 — bonus check: completion time must be within bonusTime minutes of acceptance
+                if ((offer.bonusTime > 0) and (offer.dateAccepted > 0)) {
+                    double bonusEnd = offer.dateAccepted + (double)offer.bonusTime * EvE::Time::Minute;
+                    if (GetFileTimeNow() < bonusEnd)
+                        AccountService::TransferFunds(m_agent->GetID(), pchar->itemID(), offer.bonusISK, "Mission Bonus Reward", Journal::EntryType::AgentMissionTimeBonusReward, m_agent->GetID());
+                }
                 /** @todo  add lp, etc, etc  */
                 if (offer.rewardLP)
                     LPService::AddLP(pchar->itemID(), m_agent->GetCorpID(), offer.rewardLP);
@@ -707,13 +734,18 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
             //extra->SetItemString("specificItemID", PyStatic.NewNone());
             //extra->SetItemString("blueprintInfo", PyStatic.NewNone());
         PyTuple* bonusRewards = new PyTuple(4);
+        // See A371 — timeRemaining is a FileTime duration (100ns ticks).
+        // bonusTime is stored in minutes; dateAccepted/dateIssued are FileTime timestamps.
         if (offer.dateAccepted > 0) {
-            bonusRewards->SetItem(0, new PyLong(offer.bonusTime - (offer.dateAccepted - offer.dateIssued) * EvE::Time::Minute));  // bonus time - elapsed time * minutes
+            // Bonus window = dateAccepted + bonusTime (in minutes, converted to FileTime)
+            double bonusEnd = offer.dateAccepted + (double)offer.bonusTime * EvE::Time::Minute;
+            double remaining = bonusEnd - GetFileTimeNow();
+            bonusRewards->SetItem(0, new PyLong(remaining > 0 ? (int64)remaining : 0));
         } else {
-            bonusRewards->SetItem(0, new PyLong(offer.bonusTime * EvE::Time::Minute));  // bonus time * minutes
+            bonusRewards->SetItem(0, new PyLong((int64)offer.bonusTime * EvE::Time::Minute));
         }
             bonusRewards->SetItem(1, new PyInt(itemTypeCredits));   // bonus is *usually* isk.  for now, we'll keep it as isk (easier)
-            bonusRewards->SetItem(2, new PyInt(offer.rewardISK *2));
+            bonusRewards->SetItem(2, new PyInt(offer.bonusISK));
             bonusRewards->SetItem(3, extra);
         bonusList->AddItem(bonusRewards);
     }
@@ -760,10 +792,22 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
             dunData->SetItemString("optional", new PyInt(0));
             dunData->SetItemString("ownerID", new PyInt(m_agent->GetID()));
             dunData->SetItemString("shipRestrictions", new PyInt(0));
+        // See A371 — dungeon location uses solar system + coordinates for warp-to
         PyDict* dunLoc = new PyDict();
-            dunLoc->SetItemString("typeID", new PyInt(m_agent->GetLocTypeID()));
-            dunLoc->SetItemString("locationID", new PyInt(offer.destinationID));
-            dunLoc->SetItemString("solarsystemID", new PyInt(offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationSystemID));
+            uint32 dunSysID = offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationSystemID;
+            dunLoc->SetItemString("locationID", new PyInt(dunSysID));
+            dunLoc->SetItemString("solarsystemID", new PyInt(dunSysID));
+            dunLoc->SetItemString("agentID", new PyInt(offer.agentID));
+            // Provide warp-to coordinates from the mission bubble
+            SystemBubble* pMissionBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
+            if (pMissionBubble != nullptr) {
+                GPoint center = pMissionBubble->GetCenter();
+                PyTuple* coords = new PyTuple(3);
+                    coords->SetItem(0, new PyFloat(center.x));
+                    coords->SetItem(1, new PyFloat(center.y));
+                    coords->SetItem(2, new PyFloat(center.z));
+                dunLoc->SetItemString("coords", coords);
+            }
             dunData->SetItemString("location", dunLoc);
         dunList->AddItem(dunData);
     }
@@ -943,7 +987,8 @@ PyResult AgentBound::GetDungeonShipRestrictions(PyCallArgs &call, PyInt* dungeon
     _log(AGENT__DUMP,  "AgentBound::Handle_GetDungeonShipRestrictions() - size=%lli", call.tuple->size());
     call.Dump(AGENT__DUMP);
 
-    return nullptr;
+    // See A371 — return empty list (no restrictions) instead of nullptr which crashes the client
+    return new PyList();
 }
 
 PyResult AgentBound::RemoveOfferFromJournal(PyCallArgs &call) {
@@ -976,7 +1021,16 @@ PyResult AgentBound::GotoLocation(PyCallArgs &call, PyInt* locationType, PyInt* 
     _log(AGENT__DUMP,  "AgentBound::Handle_GotoLocation() - size=%lli", call.tuple->size());
     call.Dump(AGENT__DUMP);
 
-    return nullptr;
+    // See A371 — Set autopilot destination to the mission system
+    MissionOffer offer = MissionOffer();
+    if (m_agent->HasMission(call.client->GetCharacterID(), offer)) {
+        if (offer.typeID == Mission::Type::Encounter and offer.dungeonSolarSystemID > 0) {
+            // The mission is in the agent's system, so just inform the player
+            call.client->SendInfoModalMsg("The mission site is in this system. Undock and use the journal to warp to the location.");
+        }
+    }
+
+    return PyStatic.NewNone();
 }
 
 PyResult AgentBound::WarpToLocation(PyCallArgs &call, PyInt* locationType, PyInt* locationNumber, PyFloat* warpRange, PyBool* fleet, PyInt* referringAgentID) {
@@ -984,5 +1038,24 @@ PyResult AgentBound::WarpToLocation(PyCallArgs &call, PyInt* locationType, PyInt
     _log(AGENT__DUMP,  "AgentBound::Handle_WarpToLocation() - size=%lli", call.tuple->size());
     call.Dump(AGENT__DUMP);
 
-    return nullptr;
+    // See A371 — Warp player to encounter mission pocket
+    MissionOffer offer = MissionOffer();
+    if (m_agent->HasMission(call.client->GetCharacterID(), offer)) {
+        if (offer.typeID == Mission::Type::Encounter and offer.dungeonLocationID > 0) {
+            SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
+            if (pBubble != nullptr) {
+                ShipSE* pShip = call.client->GetShipSE();
+                if (pShip != nullptr and pShip->DestinyMgr() != nullptr) {
+                    int32 distance = (warpRange != nullptr) ? (int32)warpRange->value() : 0;
+                    pShip->DestinyMgr()->WarpTo(pBubble->GetCenter(), distance);
+                    _log(AGENT__MESSAGE, "Agent %u: Warping %s to mission pocket bubble %u.",
+                            m_agent->GetID(), call.client->GetName(), pBubble->GetID());
+                }
+            } else {
+                call.client->SendErrorMsg("The mission site could not be found.");
+            }
+        }
+    }
+
+    return PyStatic.NewNone();
 }
