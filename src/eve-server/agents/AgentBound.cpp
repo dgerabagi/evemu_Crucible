@@ -287,7 +287,7 @@ PyResult AgentBound::DoAction(PyCallArgs &call, std::optional <PyInt*> actionID)
                     }
                 }
                 m_agent->UpdateOffer(pchar->itemID(), offer);
-                m_agent->SendMissionUpdate(call.client, "offer_accepted");
+                m_agent->SendMissionUpdate(call.client, "accepted");
                 agentSays->SetItem(0, new PyInt(m_agent->GetAcceptRsp(pchar->itemID())));
                 agentSays->SetItem(1, new PyInt(pchar->itemID()));
             } break;
