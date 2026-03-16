@@ -725,10 +725,13 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
 
     objectiveData->SetItemString("objectives", GetMissionObjectives(pClient, offer));
     PyList* dunList = new PyList();  // this is a list of dunData dicts
-    // See A371 — Populate dungeon entry for encounter missions
-    if (offer.typeID == Mission::Type::Encounter) {
+    // See A371 — Populate dungeon entry for encounter missions only after acceptance
+    // Before acceptance there is no dungeon instance, so nothing to display.
+    if (offer.typeID == Mission::Type::Encounter
+            and offer.stateID >= Mission::State::Accepted
+            and offer.dungeonLocationID > 0) {
         PyDict* dunData = new PyDict();
-            dunData->SetItemString("dungeonID", new PyInt(offer.dungeonLocationID ? offer.dungeonLocationID : offer.missionID));
+            dunData->SetItemString("dungeonID", new PyInt(offer.dungeonLocationID));
             if (pClient->IsMissionComplete(offer)) {
                 dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Completed));
                 dunData->SetItemString("objectiveCompleted", new PyBool(true));
@@ -737,14 +740,12 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
                 dunData->SetItemString("objectiveCompleted", new PyBool(false));
             }
             dunData->SetItemString("optional", new PyInt(0));
-            dunData->SetItemString("briefingMessage", new PyInt(offer.briefingID));
             dunData->SetItemString("ownerID", new PyInt(m_agent->GetID()));
             dunData->SetItemString("shipRestrictions", new PyInt(0));
         PyDict* dunLoc = new PyDict();
             dunLoc->SetItemString("typeID", new PyInt(m_agent->GetLocTypeID()));
-            dunLoc->SetItemString("locationID", new PyInt(offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationID));
+            dunLoc->SetItemString("locationID", new PyInt(offer.destinationID));
             dunLoc->SetItemString("solarsystemID", new PyInt(offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationSystemID));
-            dunLoc->SetItemString("referringAgentID", new PyInt(offer.agentID));
             dunData->SetItemString("location", dunLoc);
         dunList->AddItem(dunData);
     }
