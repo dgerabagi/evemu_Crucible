@@ -212,6 +212,7 @@ void MissionDataMgr::Populate()
         data.npcCount      = row.GetInt(14);
         data.dungeonID     = row.GetInt(15);
         data.npcGroupID    = row.GetInt(16);
+        data.briefingText  = row.GetText(17);
         if (data.important) {
             m_encounterImp.emplace(row.GetInt(3), data);
         } else {
@@ -313,6 +314,7 @@ void MissionDataMgr::Populate()
         offer.typeID = row.GetInt(31);
         offer.dungeonLocationID = row.GetInt(32);
         offer.dungeonSolarSystemID = row.GetInt(33);
+        offer.briefingText = row.GetText(34);
         offer.dateCompleted = 0;
         // will need to determine how to store/retrieve bookmarks as a list of dicts here
         offer.bookmarks = new PyList();
@@ -601,6 +603,7 @@ void MissionDataMgr::CreateMissionOffer(uint8 typeID, uint8 level, uint8 raceID,
             data.storyline          = eData.storyline;
             data.missionID          = eData.missionID;
             data.briefingID         = eData.briefingID;
+            data.briefingText       = eData.briefingText;
             data.rewardItemID       = eData.rewardItemID;
             data.rewardItemQty      = eData.rewardItemQty;
             data.courierTypeID      = 0;

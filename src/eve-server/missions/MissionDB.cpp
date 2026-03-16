@@ -44,8 +44,8 @@ void MissionDB::LoadEncounterData(DBQueryResult& res)
 {
     if (!sDatabase.RunQuery(res,
         "SELECT id, briefingID, name, level, typeID, important, storyline, rewardISK, rewardItemID,"
-        " rewardItemQty, bonusISK, bonusTime, sysRange, raceID, npcCount, dungeonID, npcGroupID"
-        " FROM qstEncounter WHERE briefingID > 0 AND rewardISK > 0"))
+        " rewardItemQty, bonusISK, bonusTime, sysRange, raceID, npcCount, dungeonID, npcGroupID,"
+        " IFNULL(briefingText, '') FROM qstEncounter WHERE rewardISK > 0"))
         codelog(DATABASE__ERROR, "Error in LoadEncounterData query: %s", res.error.c_str());
 }
 
@@ -56,18 +56,18 @@ void MissionDB::CreateOfferID(MissionOffer& data)
     if (!sDatabase.RunQueryLID(err, uid,
         "INSERT INTO agtOffers(acceptFee, agentID, characterID, courierAmount, courierTypeID, courierVolume, dateAccepted, dateIssued, destinationID, destinationTypeID, "
         " destinationOwnerID, destinationSystemID, expiryTime, important, storyline, missionID, briefingID, name, offerID, originID, originOwnerID, originSystemID,"
-        " remoteCompletable, remoteOfferable, rewardISK, rewardItemID, rewardItemQty, rewardLP, bonusISK, bonusTime, stateID, typeID, dungeonLocationID, dungeonSolarSystemID)"
+        " remoteCompletable, remoteOfferable, rewardISK, rewardItemID, rewardItemQty, rewardLP, bonusISK, bonusTime, stateID, typeID, dungeonLocationID, dungeonSolarSystemID, briefingText)"
         " VALUES ("
         " %u, %u, %u, %u, %u, %f, %f, %f, %u,"
         " %u, %u, %u, %f, %i, %u,"
         " %u, %u, '%s', %u, %u, %u, %u, %i,"
         " %i, %u, %u, %u, %u, %u, %u, %u,"
-        " %u, %u, %u)",
+        " %u, %u, %u, '%s')",
             data.acceptFee, data.agentID, data.characterID, data.courierAmount, data.courierTypeID, data.courierItemVolume, data.dateAccepted, data.dateIssued, data.destinationID,
             data.destinationTypeID, data.destinationOwnerID, data.destinationSystemID, data.expiryTime, (data.important?1:0), data.storyline,
             data.missionID, data.briefingID, data.name.c_str(), data.offerID, data.originID, data.originOwnerID, data.originSystemID,
             (data.remoteCompletable?1:0), (data.remoteOfferable?1:0), data.rewardISK, data.rewardItemID, data.rewardItemQty,data.rewardLP, data.bonusISK, data.bonusTime,
-            data.stateID, data.typeID, data.dungeonLocationID, data.dungeonSolarSystemID))
+            data.stateID, data.typeID, data.dungeonLocationID, data.dungeonSolarSystemID, data.briefingText.c_str()))
     {
         codelog(DATABASE__ERROR, "Failed to insert new MissionOffer: %s", err.c_str());
         return;
@@ -98,7 +98,7 @@ void MissionDB::LoadOpenOffers(DBQueryResult& res)
     if (!sDatabase.RunQuery(res,
         "SELECT acceptFee, agentID, characterID, courierAmount, courierTypeID, courierVolume, dateAccepted, dateIssued, destinationID, destinationTypeID, destinationOwnerID, destinationSystemID,"
         " expiryTime, important, storyline, missionID, briefingID, name, offerID, originID, originOwnerID, originSystemID, remoteCompletable, remoteOfferable, "
-        " rewardISK, rewardItemID, rewardItemQty, rewardLP, bonusISK, bonusTime, stateID, typeID, dungeonLocationID, dungeonSolarSystemID "
+        " rewardISK, rewardItemID, rewardItemQty, rewardLP, bonusISK, bonusTime, stateID, typeID, dungeonLocationID, dungeonSolarSystemID, IFNULL(briefingText, '') "
         " FROM agtOffers WHERE dateCompleted = 0 AND stateID < 3"))
         codelog(DATABASE__ERROR, "Error in LoadOpenOffers query: %s", res.error.c_str());
 }

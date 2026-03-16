@@ -129,8 +129,14 @@ PyResult AgentBound::DoAction(PyCallArgs &call, std::optional <PyInt*> actionID)
                             button2->SetItem(1, new PyInt(Complete));
                         dialog->AddItem(button2);
                     }
-                    agentSays->SetItem(0, new PyInt(offer.briefingID));
-                    agentSays->SetItem(1, new PyInt(offer.characterID));
+                    // See A371 — Use server-side briefingText when client lacks the messageID
+                    if (!offer.briefingText.empty()) {
+                        agentSays->SetItem(0, new PyString(offer.briefingText));
+                        agentSays->SetItem(1, PyStatic.NewNone());
+                    } else {
+                        agentSays->SetItem(0, new PyInt(offer.briefingID));
+                        agentSays->SetItem(1, new PyInt(offer.characterID));
+                    }
                 } else {
                     // dialogue data.  if RequestMission is only option, client auto-responds with DoAction(RequestMission optionID)
                     PyTuple* button2 = new PyTuple(2);
@@ -177,8 +183,14 @@ PyResult AgentBound::DoAction(PyCallArgs &call, std::optional <PyInt*> actionID)
                 *   contentID is used for specific char's mission keywords.  we're not using it like there here....
                 */
 
-                agentSays->SetItem(0, new PyInt(offer.briefingID));
-                agentSays->SetItem(1, new PyInt(offer.characterID));
+                // See A371 — Use server-side briefingText when client lacks the messageID
+                if (!offer.briefingText.empty()) {
+                    agentSays->SetItem(0, new PyString(offer.briefingText));
+                    agentSays->SetItem(1, PyStatic.NewNone());
+                } else {
+                    agentSays->SetItem(0, new PyInt(offer.briefingID));
+                    agentSays->SetItem(1, new PyInt(offer.characterID));
+                }
 
                 // dialog can also contain mission data.
                 //   set a dialog tuple[1] to dict and fill with MissionBriefingInfo
@@ -198,8 +210,14 @@ PyResult AgentBound::DoAction(PyCallArgs &call, std::optional <PyInt*> actionID)
             case ViewMission: { //1
                 MissionOffer offer = MissionOffer();
                 m_agent->GetOffer(pchar->itemID(), offer);
-                agentSays->SetItem(0, new PyInt(offer.briefingID));
-                agentSays->SetItem(1, new PyInt(offer.characterID));
+                // See A371 — Use server-side briefingText when client lacks the messageID
+                if (!offer.briefingText.empty()) {
+                    agentSays->SetItem(0, new PyString(offer.briefingText));
+                    agentSays->SetItem(1, PyStatic.NewNone());
+                } else {
+                    agentSays->SetItem(0, new PyInt(offer.briefingID));
+                    agentSays->SetItem(1, new PyInt(offer.characterID));
+                }
                 if (offer.stateID < Mission::State::Accepted) {
                     PyTuple* button1 = new PyTuple(2);
                         button1->SetItem(0, new PyInt(Accept));

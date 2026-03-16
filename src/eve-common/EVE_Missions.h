@@ -60,6 +60,7 @@ struct MissionOffer {
     double dateAccepted;
     double dateCompleted;
     std::string name;
+    std::string briefingText;   // See A371 — server-side briefing text (used when client lacks messageID)
     PyList* bookmarks;
 };
 
@@ -102,6 +103,7 @@ struct EncounterData {
     uint32 dungeonID;   // dungeon template ID (links to dunTemplates, or 0 for dynamic spawn)
     uint32 npcGroupID;  // invGroup of NPCs to spawn if no dungeon template
     std::string name;
+    std::string briefingText;   // See A371 — server-side briefing text for encounter missions
 };
 
 namespace Mission {
