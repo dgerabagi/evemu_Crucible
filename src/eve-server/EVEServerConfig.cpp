@@ -110,6 +110,7 @@ EVEServerConfig::EVEServerConfig()
     rates.SentryCritChance = 0.02;
     rates.DroneCritChance = 0.03;
     rates.ConcordCritChance = 0.05;
+    rates.skillRate = 1.0;
 
     //market
     market.FindBuyOrder = 10;
@@ -437,6 +438,7 @@ bool EVEServerConfig::ProcessRates( const TiXmlElement* ele )
     AddValueParser( "SentryCritChance",     rates.SentryCritChance );
     AddValueParser( "DroneCritChance",      rates.DroneCritChance );
     AddValueParser( "ConcordCritChance",    rates.ConcordCritChance );
+    AddValueParser( "skillRate",             rates.skillRate );
 
     const bool result = ParseElementChildren( ele );
 
@@ -468,6 +470,7 @@ bool EVEServerConfig::ProcessRates( const TiXmlElement* ele )
     RemoveParser( "SentryCritChance" );
     RemoveParser( "DroneCritChance" );
     RemoveParser( "ConcordCritChance" );
+    RemoveParser( "skillRate" );
 
     return result;
 }

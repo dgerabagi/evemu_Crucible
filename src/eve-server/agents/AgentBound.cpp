@@ -667,7 +667,9 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
     objectiveData->SetItemString("contentID", new PyInt(offer.characterID));
     objectiveData->SetItemString("importantStandings", new PyInt(offer.important));     // boolean integer
     // will need to test for this to set correctly.....
-    if (pClient->IsMissionComplete(offer)) {     // Mission::Status:: data here 0=no, 1=yes, 2=cheat
+    bool isComplete = pClient->IsMissionComplete(offer);
+    sLog.Cyan("GetMissionObjectiveInfo", "IsMissionComplete returned %s for '%s'", isComplete ? "TRUE" : "FALSE", offer.name.c_str());
+    if (isComplete) {     // Mission::Status:: data here 0=no, 1=yes, 2=cheat
         objectiveData->SetItemString("completionStatus", new PyInt(Mission::Status::Complete));
     } else {
         objectiveData->SetItemString("completionStatus", new PyInt(Mission::Status::Incomplete));
@@ -794,7 +796,10 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
         if (pMissionBubble != nullptr) {
             PyDict* dunData = new PyDict();
                 dunData->SetItemString("dungeonID", new PyInt(offer.dungeonLocationID));
-                if (pClient->IsMissionComplete(offer)) {
+                bool dunComplete = pClient->IsMissionComplete(offer);
+                sLog.Cyan("GetMissionObjectiveInfo", "Dungeon section: IsMissionComplete=%s for bubble %u",
+                        dunComplete ? "TRUE" : "FALSE", offer.dungeonLocationID);
+                if (dunComplete) {
                     dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Completed));
                     dunData->SetItemString("objectiveCompleted", new PyBool(true));
                 } else {
@@ -895,20 +900,11 @@ PyTuple* AgentBound::GetMissionObjectives(Client* pClient, MissionOffer& offer)
             objectives->SetItem(0, objType);
         } break;
         case Mission::Type::Encounter: {
-            // See A371 — Encounter missions: no fetch/cargo objective.
-            // The dungeon entry (populated in GetMissionObjectiveInfo) provides the location.
-            // Show "report to agent" objective so player knows to return after clearing.
-            PyDict* agentLoc = new PyDict();
-                agentLoc->SetItemString("typeID", new PyInt(m_agent->GetLocTypeID()));
-                agentLoc->SetItemString("locationID", new PyInt(offer.destinationID));
-                agentLoc->SetItemString("solarsystemID", new PyInt(offer.destinationSystemID));
-            PyTuple* objData = new PyTuple(2);
-                objData->SetItem(0, new PyInt(offer.agentID));
-                objData->SetItem(1, agentLoc);
-            PyTuple* objType = new PyTuple(2);
-                objType->SetItem(0, new PyString("agent"));
-                objType->SetItem(1, objData);
-            objectives->SetItem(0, objType);
+            // See A371 Bug11 — Encounter missions must NOT use "agent" objective type.
+            // The "agent" type auto-completes in client UI when player is at agent station.
+            // Encounter objectives are driven entirely by the dungeon section
+            // (populated in GetMissionObjectiveInfo) which tracks NPC kill completion.
+            objectives->SetItem(0, PyStatic.NewNone());
         } break;
         case Mission::Type::Mining: {
             PyDict* cargo = new PyDict();

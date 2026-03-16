@@ -353,6 +353,11 @@ int main( int argc, char* argv[] )
     } else {
         sLog.Green("     Missile Time","Normal.");
     }
+    if (sConfig.rates.skillRate != 1.0) {
+        sLog.Yellow(" Skill Train Rate","Modified at %.0fx.", sConfig.rates.skillRate );
+    } else {
+        sLog.Green(" Skill Train Rate","Normal.");
+    }
     std::printf("\n");     // spacer
     sLog.Blue("     ServerConfig", "R.A.M. Rate Modifiers");
     if (sConfig.ram.ResPE != 1.0) {

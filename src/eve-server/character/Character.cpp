@@ -30,6 +30,7 @@
 #include "Client.h"
 #include "ConsoleCommands.h"
 #include "EntityList.h"
+#include "EVEServerConfig.h"
 #include "StaticDataMgr.h"
 #include "StatisticMgr.h"
 #include "account/AccountService.h"
@@ -556,11 +557,11 @@ void Character::ClearSkillFlags()
         cur->SetFlag(flagSkill, false);
 }
 
-uint8 Character::GetSPPerMin(Skill* skill)
+uint16 Character::GetSPPerMin(Skill* skill)
 {
     uint8 primary = GetAttribute(skill->GetAttribute(AttrPrimaryAttribute).get_uint32()).get_uint32();
     uint8 secondary = GetAttribute(skill->GetAttribute(AttrSecondaryAttribute).get_uint32()).get_uint32();
-    return EvEMath::Skill::PointsPerMinute(primary, secondary);
+    return (uint16)(EvEMath::Skill::PointsPerMinute(primary, secondary) * sConfig.rates.skillRate);
 }
 
 SkillRef Character::GetCharSkillRef(uint16 skillTypeID) const

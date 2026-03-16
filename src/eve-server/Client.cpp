@@ -1814,6 +1814,8 @@ bool Client::ContainsTypeQty(uint16 typeID, uint32 qty) const
 
 bool Client::IsMissionComplete(MissionOffer& data)
 {
+    sLog.Cyan("IsMissionComplete", "typeID=%u stateID=%u dungeonLocationID=%u name='%s'",
+            data.typeID, data.stateID, data.dungeonLocationID, data.name.c_str());
     // dont know all the stipulations of "completion" yet, but skeleton code for starters...
     switch (data.typeID) {
         case Mission::Type::Tutorial: {
@@ -1826,9 +1828,15 @@ bool Client::IsMissionComplete(MissionOffer& data)
             // false positives from gate/station bubbles inheriting the old ID.
             if (data.stateID >= Mission::State::Accepted and data.dungeonLocationID > 0) {
                 SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(data.dungeonLocationID);
+                sLog.Cyan("IsMissionComplete", "Encounter: bubble=%p IsMission=%s CountNPCs=%u",
+                        pBubble, (pBubble != nullptr and pBubble->IsMission()) ? "true" : "false",
+                        pBubble != nullptr ? pBubble->CountNPCs() : 0);
                 if (pBubble != nullptr and pBubble->IsMission()) {
-                    if (pBubble->CountNPCs() < 1)
+                    if (pBubble->CountNPCs() < 1) {
+                        sLog.Cyan("IsMissionComplete", "=> COMPLETE (0 NPCs)");
                         return true;
+                    }
+                    sLog.Cyan("IsMissionComplete", "=> INCOMPLETE (%u NPCs alive)", pBubble->CountNPCs());
                 }
                 // Bubble nullptr or not a mission bubble: dungeon was lost (server restart).
                 // Don't assume complete — require positive NPC kill confirmation.

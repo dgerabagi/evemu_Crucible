@@ -1880,9 +1880,16 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                 maxTargets = (uint8)shipRef->GetAttribute(AttrMaxLockedTargets).get_uint32();
         }
 
+        // Debug: log the actual distance and range being checked
+        double dbgDist = pAIShip->GetPosition().distance(pTarget->GetPosition());
+        sLog.Cyan("lock_target", "char=%u target=%u(%s) dist=%.1fm maxRange=%.1fm maxTargets=%u",
+            charID, targetID, pTarget->GetName(), dbgDist, maxRange, maxTargets);
+
         bool chase = false;
         bool locked = pAIShip->TargetMgr()->StartTargeting(pTarget, lockTime, maxTargets, maxRange, chase);
         if (!locked) {
+            sLog.Warning("lock_target", "FAILED: chase=%s dist=%.1fm maxRange=%.1fm",
+                chase ? "true" : "false", dbgDist, maxRange);
             if (chase) {
                 resultMsg = "target out of range — need to approach first";
             } else {
@@ -3405,6 +3412,114 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         char buf[256];
         snprintf(buf, sizeof(buf), "bought %u x typeID %u for %.2f ISK (%.2f each) via order %u",
                  qtyBuy, typeID, totalCost, oInfo.price, orderID);
+        resultMsg = buf;
+        return true;
+    }
+
+    // See A371 Bug11 — Server-side combat mission lifecycle test.
+    // Runs the full Encounter mission flow without a client: offer → accept → verify bubble → check completion.
+    // params: {"agentID": 3008938}
+    if (cmd == "mission_test") {
+        std::string p(params);
+        // Parse agentID from params
+        uint32 agentID = 0;
+        size_t aPos = p.find("\"agentID\"");
+        if (aPos != std::string::npos) {
+            size_t colonPos = p.find(":", aPos);
+            if (colonPos != std::string::npos)
+                agentID = (uint32)atol(p.c_str() + colonPos + 1);
+        }
+        if (agentID == 0) {
+            resultMsg = "missing or invalid 'agentID' in params";
+            return false;
+        }
+
+        Agent* pAgent = sEntityList.GetAgent(agentID);
+        if (pAgent == nullptr) {
+            resultMsg = "agent not found: " + std::to_string(agentID);
+            return false;
+        }
+
+        char buf[1024];
+
+        // Step 1: Check if character already has an active mission with this agent
+        MissionOffer existingOffer = MissionOffer();
+        if (pAgent->HasMission(charID, existingOffer)) {
+            // If there's an accepted encounter mission, verify its state
+            if (existingOffer.typeID == Mission::Type::Encounter
+                    and existingOffer.stateID == Mission::State::Accepted) {
+                // Try to ensure the bubble exists (re-creates if lost after restart)
+                SystemBubble* pBubble = pAgent->EnsureEncounterBubble(existingOffer);
+
+                uint32 npcCount = 0;
+                bool isMission = false;
+                if (pBubble != nullptr) {
+                    npcCount = pBubble->CountNPCs();
+                    isMission = pBubble->IsMission();
+                }
+
+                snprintf(buf, sizeof(buf),
+                    "EXISTING mission '%s' (id=%u state=%u type=%u) "
+                    "bubbleID=%u bubble=%s IsMission=%s CountNPCs=%u "
+                    "complete=%s",
+                    existingOffer.name.c_str(), existingOffer.missionID,
+                    existingOffer.stateID, existingOffer.typeID,
+                    existingOffer.dungeonLocationID,
+                    pBubble != nullptr ? "FOUND" : "NULL",
+                    isMission ? "true" : "false",
+                    npcCount,
+                    (pBubble != nullptr and isMission and npcCount < 1) ? "TRUE(BUG!)" : "FALSE(correct)");
+                resultMsg = buf;
+                return true;
+            }
+            // Non-encounter or non-accepted mission — remove it so we can test fresh
+            pAgent->RemoveOffer(charID);
+        }
+
+        // Step 2: Create a new encounter offer
+        MissionOffer offer = MissionOffer();
+        pAgent->MakeOffer(charID, offer);
+
+        if (offer.typeID != Mission::Type::Encounter) {
+            // Got a non-encounter mission — report it
+            snprintf(buf, sizeof(buf),
+                "OFFERED non-encounter: '%s' (type=%u) — re-run to try again (random selection)",
+                offer.name.c_str(), offer.typeID);
+            resultMsg = buf;
+            return true;
+        }
+
+        // Step 3: Accept the mission — triggers SetupEncounterMission
+        offer.stateID = Mission::State::Accepted;
+        offer.dateAccepted = GetFileTimeNow();
+        offer.expiryTime = GetFileTimeNow() + (30 * pAgent->GetLevel() * EvE::Time::Minute);
+
+        pAgent->SetupEncounterMission(offer);
+        pAgent->UpdateOffer(charID, offer);
+
+        // Step 4: Verify the bubble and NPC state
+        SystemBubble* pBubble = nullptr;
+        if (offer.dungeonLocationID > 0)
+            pBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
+
+        uint32 npcCount = 0;
+        bool isMission = false;
+        if (pBubble != nullptr) {
+            npcCount = pBubble->CountNPCs();
+            isMission = pBubble->IsMission();
+        }
+
+        bool isComplete = (pBubble != nullptr and isMission and npcCount < 1);
+
+        snprintf(buf, sizeof(buf),
+            "ACCEPTED '%s' (id=%u) → bubbleID=%u bubble=%s IsMission=%s CountNPCs=%u complete=%s %s",
+            offer.name.c_str(), offer.missionID,
+            offer.dungeonLocationID,
+            pBubble != nullptr ? "FOUND" : "NULL",
+            isMission ? "true" : "false",
+            npcCount,
+            isComplete ? "TRUE(BUG!)" : "FALSE(correct)",
+            npcCount > 0 ? "— NPCs spawned OK" : "— WARNING: 0 NPCs!");
         resultMsg = buf;
         return true;
     }

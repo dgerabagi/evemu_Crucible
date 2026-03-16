@@ -244,7 +244,7 @@ public:
     void            GetSkillsList(std::vector<InventoryItemRef>& skills) const;
     void            VerifySP();
     uint32          GetTotalSPTrained()                 { return m_charData.skillPoints; };
-    uint8           GetSPPerMin(Skill* skill);
+    uint16          GetSPPerMin(Skill* skill);
     int64           GetEndOfTraining();
     uint8           InjectSkillIntoBrain(SkillRef skill);
     void            AddToSkillQueue(uint16 typeID, uint8 level);

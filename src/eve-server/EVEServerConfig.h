@@ -132,6 +132,8 @@ public:
         float SentryCritChance;
         float DroneCritChance;
         float ConcordCritChance;
+        /// Multiplier for skill training speed.  10.0 = 10x faster training.  DO NOT USE 0.0
+        float skillRate;
     } rates;
 
     // from <market>

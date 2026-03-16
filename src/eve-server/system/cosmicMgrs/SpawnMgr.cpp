@@ -441,11 +441,13 @@ void SpawnMgr::DoSpawnForMission(SystemBubble* pBubble, uint32 factionID, uint32
 
     pBubble->SetMission();
 
-    _log(SPAWN__MESSAGE, "SpawnMgr::DoSpawnForMission() - Spawning %u NPCs from group %u for mission in bubble %u.",
-            npcCount, npcGroupID, pBubble->GetID());
+    sLog.Green("DoSpawnForMission", "Spawning %u NPCs from group %u for mission in bubble %u (IsMission=%s).",
+            npcCount, npcGroupID, pBubble->GetID(), pBubble->IsMission() ? "true" : "false");
 
     GPoint startPos(pBubble->GetCenter());
     uint32 corpID = sDataMgr.GetFactionCorp(factionID);
+    sLog.Green("DoSpawnForMission", "factionID=%u, corpID=%u, center=(%.0f, %.0f, %.0f).",
+            factionID, corpID, startPos.x, startPos.y, startPos.z);
     FactionData data = FactionData();
         data.allianceID = factionID;
         data.corporationID = corpID;
@@ -458,9 +460,11 @@ void SpawnMgr::DoSpawnForMission(SystemBubble* pBubble, uint32 factionID, uint32
         "SELECT typeID FROM invTypes WHERE groupID = %u ORDER BY RAND() LIMIT %u",
         npcGroupID, npcCount))
     {
-        _log(SPAWN__ERROR, "DoSpawnForMission() - Failed to query NPC types for groupID %u.", npcGroupID);
+        sLog.Error("DoSpawnForMission", "Failed to query NPC types for groupID %u.", npcGroupID);
         return;
     }
+
+    sLog.Green("DoSpawnForMission", "Query returned rows for groupID %u.", npcGroupID);
 
     NPC* pNPC(nullptr);
     InventoryItemRef iRef(nullptr);
@@ -468,6 +472,7 @@ void SpawnMgr::DoSpawnForMission(SystemBubble* pBubble, uint32 factionID, uint32
     uint8 spawned = 0;
     while (res.GetRow(row)) {
         uint32 typeID = row.GetInt(0);
+        sLog.Green("DoSpawnForMission", "Processing NPC typeID %u...", typeID);
         // Spread NPCs around the bubble center
         GPoint npcPos(startPos);
         npcPos.MakeRandomPointOnSphere(MakeRandomInt(5, 20) * 1000); // 5-20km from center
@@ -475,22 +480,23 @@ void SpawnMgr::DoSpawnForMission(SystemBubble* pBubble, uint32 factionID, uint32
         ItemData idata(typeID, corpID, m_system->GetID(), flagNone, "", npcPos, "MissionRat");
         iRef = sItemFactory.SpawnItem(idata);
         if (iRef.get() == nullptr) {
-            _log(SPAWN__ERROR, "DoSpawnForMission() - Failed to spawn item type %u.", typeID);
+            sLog.Error("DoSpawnForMission", "Failed to SpawnItem for typeID %u.", typeID);
             continue;
         }
 
-        _log(SPAWN__POP, "SpawnMgr::DoSpawnForMission - Spawning NPC type %u (%u)", typeID, iRef->itemID());
+        sLog.Green("DoSpawnForMission", "SpawnItem OK: typeID %u, itemID %u.", typeID, iRef->itemID());
 
         pNPC = new NPC(iRef, m_services, m_system, data, this);
         if (pNPC == nullptr)
             continue;
 
         if (!pNPC->Load()) {
-            _log(SPAWN__ERROR, "DoSpawnForMission() - Failed to load NPC %u (type %u), depoping.", pNPC->GetID(), typeID);
+            sLog.Error("DoSpawnForMission", "NPC::Load() failed for itemID %u (type %u), depoping.", pNPC->GetID(), typeID);
             pNPC->Delete();
             continue;
         }
 
+        sLog.Green("DoSpawnForMission", "NPC loaded OK: itemID %u, adding to system.", pNPC->GetID());
         m_system->AddNPC(pNPC);
         pNPC->DestinyMgr()->SetPosition(npcPos);
 
@@ -516,8 +522,8 @@ void SpawnMgr::DoSpawnForMission(SystemBubble* pBubble, uint32 factionID, uint32
     if (spawned > 0)
         m_bubbles.push_back(pBubble);
 
-    _log(SPAWN__TRACE, "DoSpawnForMission() completed: spawned %u/%u NPCs in bubble %u.",
-            spawned, npcCount, pBubble->GetID());
+    sLog.Green("DoSpawnForMission", "Completed: spawned %u/%u NPCs in bubble %u. CountNPCs=%u.",
+            spawned, npcCount, pBubble->GetID(), pBubble->CountNPCs());
 }
 
 bool SpawnMgr::DoSpawnForBubble(SystemBubble* pBubble)

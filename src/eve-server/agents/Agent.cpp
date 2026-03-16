@@ -69,15 +69,18 @@ bool Agent::Load() {
 // See A371 §Phase2 (Encounter mission setup — spawns NPCs on mission accept)
 void Agent::SetupEncounterMission(MissionOffer& offer)
 {
+    sLog.Green("SetupEncounter", "Agent %u: Setting up encounter for '%s' (missionID=%u).",
+            m_agentID, offer.name.c_str(), offer.missionID);
+
     SystemManager* pSysMgr = sEntityList.FindOrBootSystem(m_agentData.solarSystemID);
     if (pSysMgr == nullptr) {
-        _log(AGENT__ERROR, "Agent %u: Could not boot system %u for encounter mission.", m_agentID, m_agentData.solarSystemID);
+        sLog.Error("SetupEncounter", "Agent %u: Could not boot system %u.", m_agentID, m_agentData.solarSystemID);
         return;
     }
 
     SpawnMgr* pSpawnMgr = pSysMgr->GetSpawnMgr();
     if (pSpawnMgr == nullptr) {
-        _log(AGENT__ERROR, "Agent %u: SpawnMgr null for system %u.", m_agentID, m_agentData.solarSystemID);
+        sLog.Error("SetupEncounter", "Agent %u: SpawnMgr null for system %u.", m_agentID, m_agentData.solarSystemID);
         return;
     }
 
@@ -100,9 +103,17 @@ void Agent::SetupEncounterMission(MissionOffer& offer)
     if (sMissionDataMgr.GetEncounterData(offer.missionID, offer.typeID, m_agentData.level, eData)) {
         npcGroupID = eData.npcGroupID;
         npcCount = eData.npcCount;
+        sLog.Green("SetupEncounter", "Agent %u: EncounterData found — npcGroupID=%u, npcCount=%u.",
+                m_agentID, npcGroupID, npcCount);
+    } else {
+        sLog.Warning("SetupEncounter", "Agent %u: No EncounterData for missionID=%u typeID=%u level=%u. Using dungeonLocationID=%u as groupID.",
+                m_agentID, offer.missionID, offer.typeID, m_agentData.level, npcGroupID);
     }
     if (npcGroupID == 0)
         npcGroupID = 818;  // fallback: Mission Generic Frigates
+
+    sLog.Green("SetupEncounter", "Agent %u: Spawning %u NPCs (group %u) in bubble %u, factionID=%u.",
+            m_agentID, npcCount, npcGroupID, pBubble->GetID(), m_agentData.factionID);
 
     // Spawn the NPCs
     pSpawnMgr->DoSpawnForMission(pBubble, m_agentData.factionID, npcGroupID, npcCount);
@@ -111,8 +122,8 @@ void Agent::SetupEncounterMission(MissionOffer& offer)
     offer.dungeonLocationID = pBubble->GetID();
     offer.dungeonSolarSystemID = m_agentData.solarSystemID;
 
-    _log(AGENT__MESSAGE, "Agent %u: Setup encounter mission '%s' in bubble %u, system %u, %u NPCs from group %u.",
-            m_agentID, offer.name.c_str(), pBubble->GetID(), m_agentData.solarSystemID, npcCount, npcGroupID);
+    sLog.Green("SetupEncounter", "Agent %u: Setup complete — bubble %u, system %u, CountNPCs=%u.",
+            m_agentID, pBubble->GetID(), m_agentData.solarSystemID, pBubble->CountNPCs());
 }
 
 // See A371 Bug10 — re-create encounter bubble if lost after server restart
@@ -121,11 +132,21 @@ SystemBubble* Agent::EnsureEncounterBubble(MissionOffer& offer)
     if (offer.typeID != Mission::Type::Encounter or offer.stateID < Mission::State::Accepted)
         return nullptr;
 
+    sLog.Cyan("EnsureEncounterBubble", "Agent %u: checking bubble %u for '%s' (state=%u).",
+            m_agentID, offer.dungeonLocationID, offer.name.c_str(), offer.stateID);
+
     // Check if existing bubble is still valid
     if (offer.dungeonLocationID > 0) {
         SystemBubble* pBubble = sBubbleMgr.FindBubbleByID(offer.dungeonLocationID);
-        if (pBubble != nullptr and pBubble->IsMission())
+        if (pBubble != nullptr and pBubble->IsMission()) {
+            sLog.Cyan("EnsureEncounterBubble", "Agent %u: bubble %u valid (IsMission=true, CountNPCs=%u).",
+                    m_agentID, pBubble->GetID(), pBubble->CountNPCs());
             return pBubble;  // bubble survived restart — all good
+        }
+        sLog.Warning("EnsureEncounterBubble", "Agent %u: bubble %u invalid (found=%s, IsMission=%s). Re-creating.",
+                m_agentID, offer.dungeonLocationID,
+                pBubble != nullptr ? "true" : "false",
+                (pBubble != nullptr and pBubble->IsMission()) ? "true" : "false");
     }
 
     // Bubble was lost (server restart recycles IDs). Re-create.
