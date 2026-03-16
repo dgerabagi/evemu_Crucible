@@ -632,7 +632,12 @@ PyResult AgentBound::GetMissionJournalInfo(PyCallArgs &call, std::optional <PyIn
     PyDict* journalInfo = new PyDict();
     journalInfo->SetItemString("contentID", new PyInt(offer.characterID));
     journalInfo->SetItemString("missionNameID", new PyInt(offer.missionID));
-    journalInfo->SetItemString("briefingTextID", new PyInt(offer.briefingID));
+    // See A371 — Use server-side briefingText when client lacks the messageID
+    if (!offer.briefingText.empty()) {
+        journalInfo->SetItemString("briefingTextID", new PyString(offer.briefingText));
+    } else {
+        journalInfo->SetItemString("briefingTextID", new PyInt(offer.briefingID));
+    }
     journalInfo->SetItemString("missionState", new PyInt(offer.stateID));
     journalInfo->SetItemString("expirationTime", new PyLong(offer.expiryTime) );
     journalInfo->SetItemString("objectives", GetMissionObjectiveInfo(call.client, offer));
@@ -799,6 +804,8 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
         PyDict* dunLoc = new PyDict();
             uint32 dunSysID = offer.dungeonSolarSystemID ? offer.dungeonSolarSystemID : offer.destinationSystemID;
             dunLoc->SetItemString("locationID", new PyInt(dunSysID));
+            dunLoc->SetItemString("typeID", new PyInt(5));  // typeID 5 = Solar System
+            dunLoc->SetItemString("locationType", new PyString("objective.destination"));
             dunLoc->SetItemString("solarsystemID", new PyInt(dunSysID));
             dunLoc->SetItemString("agentID", new PyInt(offer.agentID));
             // Provide warp-to coordinates from the mission bubble
