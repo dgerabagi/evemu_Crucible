@@ -802,12 +802,15 @@ PyDict* AgentBound::GetMissionObjectiveInfo(Client* pClient, MissionOffer& offer
                 bool dunComplete = pClient->IsMissionComplete(offer);
                 sLog.Cyan("GetMissionObjectiveInfo", "Dungeon section: IsMissionComplete=%s for bubble %u",
                         dunComplete ? "TRUE" : "FALSE", offer.dungeonLocationID);
+                // See A371 Bug13 — Client indexes completionStatus as [Completed,Failed][value].
+                // Key must be ABSENT when dungeon is in-progress; 0=completed, 1=failed.
+                // objectiveCompleted: None=circle(in-progress), false=cross, true=check.
                 if (dunComplete) {
-                    dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Completed));
+                    dunData->SetItemString("completionStatus", new PyInt(0));  // 0 = completed in client list
                     dunData->SetItemString("objectiveCompleted", new PyBool(true));
                 } else {
-                    dunData->SetItemString("completionStatus", new PyInt(Dungeon::Status::Started));
-                    dunData->SetItemString("objectiveCompleted", new PyBool(false));
+                    // Don't include completionStatus — client treats its presence as "done"
+                    dunData->SetItemString("objectiveCompleted", PyStatic.NewNone());
                 }
                 dunData->SetItemString("optional", new PyInt(0));
                 dunData->SetItemString("ownerID", new PyInt(m_agent->GetID()));
@@ -1048,7 +1051,7 @@ PyResult AgentBound::GotoLocation(PyCallArgs &call, PyInt* locationType, PyInt* 
     return PyStatic.NewNone();
 }
 
-PyResult AgentBound::WarpToLocation(PyCallArgs &call, PyInt* locationType, PyInt* locationNumber, PyFloat* warpRange, PyBool* fleet, PyInt* referringAgentID) {
+PyResult AgentBound::WarpToLocation(PyCallArgs &call, PyRep* locationType, PyInt* locationNumber, PyFloat* warpRange, PyBool* fleet, std::optional<PyInt*> referringAgentID) {
     //sm.StartService('agents').GetAgentMoniker(bookmark.agentID).WarpToLocation(bookmark.locationType, bookmark.locationNumber, warpRange, fleet, referringAgentID)
     _log(AGENT__DUMP,  "AgentBound::Handle_WarpToLocation() - size=%lli", call.tuple->size());
     call.Dump(AGENT__DUMP);
