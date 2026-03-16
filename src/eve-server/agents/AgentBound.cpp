@@ -524,9 +524,12 @@ PyResult AgentBound::GetMissionKeywords(PyCallArgs &call, PyInt* contentID) {
     if (contentID == 0)
         return PyStatic.NewNone();
     */
+    // See A371 Bug12 — MUST return an empty dict (not PyNone) when no mission exists.
+    // Client does msgArgs = GetMissionKeywords(contentID), then msgArgs.update(...)
+    // If we return PyNone, client crashes: 'NoneType has no attribute update'
     MissionOffer offer = MissionOffer();
     if (!m_agent->HasMission(call.client->GetCharacterID(), offer))
-        return PyStatic.NewNone();
+        return new PyDict();
 
     PyDict* keywords = new PyDict();
     keywords->SetItemString("objectiveLocationID", new PyInt(offer.originID));
@@ -875,10 +878,11 @@ PyTuple* AgentBound::GetMissionObjectives(Client* pClient, MissionOffer& offer)
         dropoffLocation->SetItemString("referringAgentID", new PyInt(offer.agentID) );
     }
 
-    PyTuple* objectives = new PyTuple(1);
+    PyTuple* objectives = nullptr;
     switch (offer.typeID) {
         case Mission::Type::Trade:
         case Mission::Type::Courier: {
+            objectives = new PyTuple(1);
             PyDict* pickupLocation = new PyDict();
                 pickupLocation->SetItemString("typeID", new PyInt(m_agent->GetLocTypeID()) );
                 pickupLocation->SetItemString("locationID", new PyInt(offer.originID) );
@@ -900,13 +904,14 @@ PyTuple* AgentBound::GetMissionObjectives(Client* pClient, MissionOffer& offer)
             objectives->SetItem(0, objType);
         } break;
         case Mission::Type::Encounter: {
-            // See A371 Bug11 — Encounter missions must NOT use "agent" objective type.
-            // The "agent" type auto-completes in client UI when player is at agent station.
-            // Encounter objectives are driven entirely by the dungeon section
-            // (populated in GetMissionObjectiveInfo) which tracks NPC kill completion.
-            objectives->SetItem(0, PyStatic.NewNone());
+            // See A371 Bug12 — Encounter objectives must be an EMPTY tuple, not tuple(None).
+            // Client iterates objectives with 'for objType, objData in objectives' — if element
+            // is None, 'NoneType is not iterable' crash in BuildObjectiveHTML.
+            // Encounter objectives are driven entirely by the dungeon section.
+            objectives = new PyTuple(0);
         } break;
         case Mission::Type::Mining: {
+            objectives = new PyTuple(1);
             PyDict* cargo = new PyDict();
                 cargo->SetItemString("hasCargo", new PyBool(pClient->ContainsTypeQty(offer.courierTypeID, offer.courierAmount)));
                 cargo->SetItemString("typeID", new PyInt(offer.courierTypeID));
@@ -929,9 +934,11 @@ PyTuple* AgentBound::GetMissionObjectives(Client* pClient, MissionOffer& offer)
         case Mission::Type::Research:
         case Mission::Type::Storyline:
         case Mission::Type::Tutorial: {
-            objectives->SetItem(0, PyStatic.NewNone());
+            objectives = new PyTuple(0);
         } break;
     }
+    if (objectives == nullptr)
+        objectives = new PyTuple(0);
 
     // cleanup
     PySafeDecRef(dropoffLocation);
