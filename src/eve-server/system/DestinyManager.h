@@ -322,6 +322,12 @@ private:
     // its own warp-exit transition).
     uint8 m_postWarpCorrectionTicks;
 
+    // See A371 Bug19 — Periodic position sync for player ships.
+    // Server and client compute movement physics independently. Without
+    // periodic position broadcasts, floating-point and timing differences
+    // accumulate into large position errors during combat movement.
+    uint8 m_positionSyncTicks;
+
     // check to align destiny movement to tic
     bool m_ticAlign;
     void SendMovementPacket();

@@ -78,6 +78,7 @@ m_warpCapacitorNeed(0.00001),
 m_frozen(false),
 m_ticAlign(false),
 m_postWarpCorrectionTicks(0),
+m_positionSyncTicks(0),
 mvPacket(nullptr)
 {
     m_bump = false;
@@ -588,6 +589,7 @@ void DestinyManager::Halt() {
     m_activeSpeedFraction = 0.0f;
     m_timeFraction = 0.0f;
     m_maxOrbitSpeedFraction = 1.0f;
+    m_positionSyncTicks = 0;
 
     m_targetEntity.first = 0;
     m_targetEntity.second = nullptr;
@@ -889,7 +891,20 @@ void DestinyManager::MoveObject() {
 
     //set velocity and position for this tic
     m_velocity = m_shipHeading * speed;
-    SetPosition(m_position + m_velocity, sConfig.debug.PositionHack);   // (PositionHack == true) here will force position update to client
+
+    // See A371 Bug19 — Periodic position sync for player ships.
+    // Server and client compute movement physics independently (PositionHack=false).
+    // Floating-point differences in turn rate, timing, and speed calculations cause
+    // position to diverge ~5-10km per target approach. Broadcast SetBallPosition every
+    // 5 ticks (5 seconds) to correct accumulated drift during active movement.
+    bool forceSync = false;
+    if (mySE->HasPilot() && !sConfig.debug.PositionHack) {
+        if (++m_positionSyncTicks >= 5) {
+            m_positionSyncTicks = 0;
+            forceSync = true;
+        }
+    }
+    SetPosition(m_position + m_velocity, sConfig.debug.PositionHack || forceSync);
 
     // Note: post-warp position correction moved to ProcessState STOP handler (Bug 18).
     // MoveObject is never called for fully stopped ships (after WarpStop → Halt).
@@ -1799,6 +1814,15 @@ void DestinyManager::WarpUpdate(double currentShipSpeed) {
         SystemBubble* midWarpSystemBubble(sBubbleMgr.FindBubble(mySE->SystemMgr()->GetID(), m_position));
         if (midWarpSystemBubble == nullptr)
             midWarpSystemBubble = sBubbleMgr.GetBubble(mySE->SystemMgr(), m_position);
+
+        // See A371 Bug19 — Remove from previous bubble before adding to new one.
+        // Without this, the entity remains in m_dynamicEntities of every intermediate
+        // bubble it passes through during warp. ProcessWander then finds it "outside"
+        // all those old bubbles and logs wanderer warnings for each one.
+        if (mySE->SysBubble() != nullptr && mySE->SysBubble() != midWarpSystemBubble) {
+            mySE->SysBubble()->Remove(mySE);
+        }
+
         _log(
             DESTINY__WARP_TRACE,
             "Destiny::WarpUpdate()  %s(%u): adding to midWarpSystemBubble %u.",
