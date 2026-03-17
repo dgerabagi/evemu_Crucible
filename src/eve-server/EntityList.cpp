@@ -2561,9 +2561,29 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             double distSq = pAIShip->DistanceTo2(se);
             double dist = sqrt(distSq);
 
-            char entry[256];
-            snprintf(entry, sizeof(entry), "%u|%s|%u|%s|%.0f;",
-                     se->GetID(), se->GetName(), se->GetTypeID(), category, dist);
+            // See A371 Bug19 — Battle telemetry: include HP percentages for combat entities.
+            // Format: id|name|typeID|category|distance|shieldPct|armorPct|hullPct
+            // Non-combat entities (asteroids, stations, etc.) get -1|-1|-1 for HP fields.
+            float shieldPct = -1.0f, armorPct = -1.0f, hullPct = -1.0f;
+            if (se->IsNPCSE() || se->IsShipSE() || se->IsAIShipSE()) {
+                InventoryItemRef item = se->GetSelf();
+                if (item.get() != nullptr) {
+                    float shieldCap = item->GetAttribute(AttrShieldCapacity).get_float();
+                    float shieldChg = item->GetAttribute(AttrShieldCharge).get_float();
+                    float armorMax  = item->GetAttribute(AttrArmorHP).get_float();
+                    float armorDmg  = item->GetAttribute(AttrArmorDamage).get_float();
+                    float hullMax   = item->GetAttribute(AttrHP).get_float();
+                    float hullDmg   = item->GetAttribute(AttrDamage).get_float();
+                    shieldPct = (shieldCap > 0) ? (shieldChg / shieldCap * 100.0f) : 0.0f;
+                    armorPct  = (armorMax > 0)  ? ((1.0f - armorDmg / armorMax) * 100.0f) : 0.0f;
+                    hullPct   = (hullMax > 0)   ? ((1.0f - hullDmg / hullMax) * 100.0f) : 0.0f;
+                }
+            }
+
+            char entry[512];
+            snprintf(entry, sizeof(entry), "%u|%s|%u|%s|%.0f|%.0f|%.0f|%.0f;",
+                     se->GetID(), se->GetName(), se->GetTypeID(), category, dist,
+                     shieldPct, armorPct, hullPct);
             result += entry;
             count++;
             if (count >= 50)  // cap at 50 entries
