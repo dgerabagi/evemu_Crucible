@@ -897,14 +897,28 @@ void DestinyManager::MoveObject() {
     // Floating-point differences in turn rate, timing, and speed calculations cause
     // position to diverge ~5-10km per target approach. Broadcast SetBallPosition every
     // 5 ticks (5 seconds) to correct accumulated drift during active movement.
+    // See A371 Bug22 — Extended to NPCs: NPC position sync every 3 ticks keeps
+    // client dead-reckoning from diverging during orbit/follow.
     bool forceSync = false;
-    if (mySE->HasPilot() && !sConfig.debug.PositionHack) {
-        if (++m_positionSyncTicks >= 5) {
+    if (!sConfig.debug.PositionHack) {
+        uint8 syncInterval = mySE->HasPilot() ? 5 : 3;
+        if (++m_positionSyncTicks >= syncInterval) {
             m_positionSyncTicks = 0;
             forceSync = true;
         }
     }
-    SetPosition(m_position + m_velocity, sConfig.debug.PositionHack || forceSync);
+
+    // See A371 Bug22 — In active orbit (Orbiting/Close/Far), Orbit() already computed the
+    // exact position on the orbit circle. Adding velocity on top double-moves the entity.
+    // When two entities orbit each other (player↔NPC), this error feeds back: each entity's
+    // orbit center uses the other's displaced position, accumulating drift at ~(v1+v2) m/s.
+    // Over 87 seconds of combat at ~645 m/s combined, this produced the observed 53km desync.
+    if (m_orbiting > 0 && m_orbiting < Destiny::Ball::Orbit::TooClose) {
+        // Position already set by Orbit(); don't add velocity.
+        SetPosition(m_position, sConfig.debug.PositionHack || forceSync);
+    } else {
+        SetPosition(m_position + m_velocity, sConfig.debug.PositionHack || forceSync);
+    }
 
     // Note: post-warp position correction moved to ProcessState STOP handler (Bug 18).
     // MoveObject is never called for fully stopped ships (after WarpStop → Halt).
@@ -2073,6 +2087,11 @@ void DestinyManager::Follow(SystemEntity* pSE, uint32 distance) {
     m_ticAlign = true;
     BeginMovement();
 
+    // See A371 Bug22 — Same as orbit: BeginMovement() resets accel/decel but nothing
+    // starts acceleration. NPCs calling Follow() need proper speed initialization.
+    if (m_userSpeedFraction < 0.01f || m_activeSpeedFraction < 0.01f)
+        SetSpeedFraction(1.0f, true);
+
     CmdFollowBall du;
         du.entityID = mySE->GetID();
         du.targetID = pSE->GetID();
@@ -2340,6 +2359,13 @@ void DestinyManager::Orbit(SystemEntity *pSE, uint32 distance/*0*/) {
     m_targetPoint = pSE->GetPosition();
     m_targetDistance = static_cast<double>(distance);
     BeginMovement();
+
+    // See A371 Bug22 — BeginMovement() resets accel/decel/turn flags to false, but nothing
+    // starts acceleration afterward. For NPCs especially, this left m_accel=false causing
+    // "move checks are not set right" errors every tick and potentially zero speed.
+    // Start acceleration so the entity properly ramps up to orbit speed.
+    if (m_userSpeedFraction < 0.01f || m_activeSpeedFraction < 0.01f)
+        SetSpeedFraction(1.0f, true);
 
     if (is_log_enabled(DESTINY__ORBIT_TRACE))
         _log(DESTINY__ORBIT_TRACE, "%s(%u) - Ship Data - agility:%.3f, inertia:%.3f, massMkg:%.3f, maxSpeed:%.2f, radius:%.2f", \
