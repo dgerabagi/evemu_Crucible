@@ -416,7 +416,8 @@ void ActiveModule::Activate(uint16 effectID, uint32 targetID/*0*/, int16 repeat/
     if (m_linkMaster) {
         m_shipRef->GetLinkedWeaponMods(m_modRef->flag(), modules);
         for (auto cur : modules) {
-            cur->GetActiveModule()->SetSlaveData(pShip);
+            // See A371 §11 (Bug 21) — pass master's target/effect to slaves
+            cur->GetActiveModule()->SetSlaveData(pShip, m_targetID, m_targetSE, m_effectID);
             cur->GetActiveModule()->ShowEffect(true, false);
         }
     } else {
@@ -487,11 +488,17 @@ void ActiveModule::Deactivate(std::string effect/*""*/)
     m_Stop = true;
 }
 
-void ActiveModule::SetSlaveData(ShipSE* pShip) {
+// See A371 §11 (Bug 21) — propagate target/effect data from master to slave modules.
+// Without this, slaves get target=0 and effectID=0 in ShowEffect(), producing broken
+// laser visuals and client FxErrors.
+void ActiveModule::SetSlaveData(ShipSE* pShip, uint32 targetID, SystemEntity* targetSE, uint16 effectID) {
     m_bubble = pShip->SysBubble();
     m_sysMgr = pShip->SystemMgr();
     m_targMgr = pShip->TargetMgr();
     m_destinyMgr = pShip->DestinyMgr();
+    m_targetID = targetID;
+    m_targetSE = targetSE;
+    m_effectID = effectID;
 }
 
 void ActiveModule::Overload()

@@ -197,11 +197,15 @@ void Concord::EncodeDestiny( Buffer& into ) const
 
 
 void Concord::MakeDamageState(DoDestinyDamageState &into) const {
-    into.shield = m_shieldCharge / m_self->GetAttribute(AttrShieldCapacity).get_float();
-    into.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_float() + 8;
+    // See A371 §11 (Bug 20) — protect against div-by-zero on HP attributes.
+    float shieldCap = m_self->GetAttribute(AttrShieldCapacity).get_float();
+    float armorHP = m_self->GetAttribute(AttrArmorHP).get_float();
+    float hullHP = m_self->GetAttribute(AttrHP).get_float();
+    into.shield = (shieldCap > 0.0f) ? (m_shieldCharge / shieldCap) : 1.0;
+    into.recharge = std::max(10000.0f, m_self->GetAttribute(AttrShieldRechargeRate).get_float());
     into.timestamp = GetFileTimeNow();
-    into.armor = 1.0 - (m_armorDamage / m_self->GetAttribute(AttrArmorHP).get_float());
-    into.structure = 1.0 - (m_hullDamage / m_self->GetAttribute(AttrHP).get_float());
+    into.armor = (armorHP > 0.0f) ? (1.0 - (m_armorDamage / armorHP)) : 1.0;
+    into.structure = (hullHP > 0.0f) ? (1.0 - (m_hullDamage / hullHP)) : 1.0;
 }
 
 void Concord::UseShieldRecharge()

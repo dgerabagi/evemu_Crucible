@@ -172,12 +172,18 @@ double SystemEntity::DistanceTo2(const SystemEntity* other) {
 }
 
 void SystemEntity::SendDamageStateChanged() {  //working 24Apr15
+     // See A371 §11 (Bug 20) — clamp recharge and protect against div-by-zero.
+     // Client michelle.py:GetDamageState() divides by tau; tau=0 causes ZeroDivisionError
+     // that cascades into frozen UI (shields not updating, ship appearing stuck).
      DamageDetails dmgState;
-        dmgState.shield = m_self->GetAttribute(AttrShieldCharge).get_double() / m_self->GetAttribute(AttrShieldCapacity).get_double();
-        dmgState.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_double();
+        double shieldCap = m_self->GetAttribute(AttrShieldCapacity).get_double();
+        double armorHP = m_self->GetAttribute(AttrArmorHP).get_double();
+        double hullHP = m_self->GetAttribute(AttrHP).get_double();
+        dmgState.shield = (shieldCap > 0.0) ? (m_self->GetAttribute(AttrShieldCharge).get_double() / shieldCap) : 1.0;
+        dmgState.recharge = std::max(10000.0, m_self->GetAttribute(AttrShieldRechargeRate).get_double());
         dmgState.timestamp = GetFileTimeNow();
-        dmgState.armor = (1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / m_self->GetAttribute(AttrArmorHP).get_double()));
-        dmgState.structure = (1.0 - (m_self->GetAttribute(AttrDamage).get_double() / m_self->GetAttribute(AttrHP).get_double()));
+        dmgState.armor = (armorHP > 0.0) ? (1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / armorHP)) : 1.0;
+        dmgState.structure = (hullHP > 0.0) ? (1.0 - (m_self->GetAttribute(AttrDamage).get_double() / hullHP)) : 1.0;
      OnDamageStateChange dmgChange;
         dmgChange.entityID = m_self->itemID();
         dmgChange.state = dmgState.Encode();
@@ -480,11 +486,15 @@ void ItemSystemEntity::MakeDamageState(DoDestinyDamageState &into) {
     if (m_self->groupID() == EVEDB::invGroups::Force_Field) {
         SystemEntity::MakeDamageState(into);
     } else {
-        into.shield = (m_self->GetAttribute(AttrShieldCharge).get_double() / m_self->GetAttribute(AttrShieldCapacity).get_double());
-        into.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_double();
+        // See A371 §11 (Bug 20) — protect against div-by-zero on HP attributes.
+        double shieldCap = m_self->GetAttribute(AttrShieldCapacity).get_double();
+        double armorHP = m_self->GetAttribute(AttrArmorHP).get_double();
+        double hullHP = m_self->GetAttribute(AttrHP).get_double();
+        into.shield = (shieldCap > 0.0) ? (m_self->GetAttribute(AttrShieldCharge).get_double() / shieldCap) : 1.0;
+        into.recharge = std::max(10000.0, m_self->GetAttribute(AttrShieldRechargeRate).get_double());
         into.timestamp = GetFileTimeNow();
-        into.armor = 1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / m_self->GetAttribute(AttrArmorHP).get_double());
-        into.structure = 1.0 - (m_self->GetAttribute(AttrDamage).get_double() / m_self->GetAttribute(AttrHP).get_double());
+        into.armor = (armorHP > 0.0) ? (1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / armorHP)) : 1.0;
+        into.structure = (hullHP > 0.0) ? (1.0 - (m_self->GetAttribute(AttrDamage).get_double() / hullHP)) : 1.0;
     }
 }
 
@@ -755,23 +765,31 @@ void DynamicSystemEntity::EncodeDestiny( Buffer& into )
 }
 
 void DynamicSystemEntity::MakeDamageState(DoDestinyDamageState &into) {
-    into.shield = (m_self->GetAttribute(AttrShieldCharge).get_double() / m_self->GetAttribute(AttrShieldCapacity).get_double());
-    into.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_double();
+    // See A371 §11 (Bug 20) — protect against div-by-zero on HP attributes.
+    double shieldCap = m_self->GetAttribute(AttrShieldCapacity).get_double();
+    double armorHP = m_self->GetAttribute(AttrArmorHP).get_double();
+    double hullHP = m_self->GetAttribute(AttrHP).get_double();
+    into.shield = (shieldCap > 0.0) ? (m_self->GetAttribute(AttrShieldCharge).get_double() / shieldCap) : 1.0;
+    into.recharge = std::max(10000.0, m_self->GetAttribute(AttrShieldRechargeRate).get_double());
     into.timestamp = GetFileTimeNow();
-    into.armor = 1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / m_self->GetAttribute(AttrArmorHP).get_double());
-    into.structure = 1.0 - (m_self->GetAttribute(AttrDamage).get_double() / m_self->GetAttribute(AttrHP).get_double());
+    into.armor = (armorHP > 0.0) ? (1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / armorHP)) : 1.0;
+    into.structure = (hullHP > 0.0) ? (1.0 - (m_self->GetAttribute(AttrDamage).get_double() / hullHP)) : 1.0;
 }
 
 void DynamicSystemEntity::UpdateDamage()
 {
     /** @todo (Allan) needs more work */
     SystemEntity::UpdateDamage();
+     // See A371 §11 (Bug 20) — protect against div-by-zero on HP attributes.
      DamageDetails dmgState;
-        dmgState.shield = m_self->GetAttribute(AttrShieldCharge).get_double() / m_self->GetAttribute(AttrShieldCapacity).get_double();
-        dmgState.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_double();
+        double shieldCap = m_self->GetAttribute(AttrShieldCapacity).get_double();
+        double armorHP = m_self->GetAttribute(AttrArmorHP).get_double();
+        double hullHP = m_self->GetAttribute(AttrHP).get_double();
+        dmgState.shield = (shieldCap > 0.0) ? (m_self->GetAttribute(AttrShieldCharge).get_double() / shieldCap) : 1.0;
+        dmgState.recharge = std::max(10000.0, m_self->GetAttribute(AttrShieldRechargeRate).get_double());
         dmgState.timestamp = GetFileTimeNow();
-        dmgState.armor = 1.0 - m_self->GetAttribute(AttrArmorDamage).get_double() / m_self->GetAttribute(AttrArmorHP).get_double();
-        dmgState.structure = 1.0 - m_self->GetAttribute(AttrDamage).get_double() / m_self->GetAttribute(AttrHP).get_double();
+        dmgState.armor = (armorHP > 0.0) ? (1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / armorHP)) : 1.0;
+        dmgState.structure = (hullHP > 0.0) ? (1.0 - (m_self->GetAttribute(AttrDamage).get_double() / hullHP)) : 1.0;
      OnDamageStateChange dmgChange;
         dmgChange.entityID = m_self->itemID();
         dmgChange.state = dmgState.Encode();
