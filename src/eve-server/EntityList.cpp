@@ -54,6 +54,7 @@
 #include "inventory/Inventory.h"    // See A321 §4.5 — Inventory access for mining ore extraction
 #include "station/ReprocessingDB.h"   // See A331 §3.5 — Ore reprocessing primitives
 #include "account/AccountService.h"   // See A331 §3.5 — Market transaction ISK transfers
+#include "system/Damage.h"            // See A371 §9 — AI weapon activation (direct damage pattern)
 
 EntityList::EntityList()
 : m_services(nullptr),
@@ -1999,8 +2000,133 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         }
 
         if (!isMiningModule) {
-            resultMsg = "non-mining module activation not yet implemented (only mining supported)";
-            return false;
+            // --- Weapon activation: turrets/lasers (direct damage, same pattern as NPC turrets) ---
+            // See A371 §9 (AI combat self-testing) — bypasses ModuleManager (requires Client*).
+            // Uses the same Damage constructor + ApplyDamage() pipeline as NPCAIMgr::AttackTarget().
+
+            // Look up loaded charge in same slot (categoryID=8 = Charge)
+            DBQueryResult chargeRes;
+            InventoryItemRef chargeRef;
+            float emDmg = 0, kinDmg = 0, therDmg = 0, expDmg = 0;
+            bool hasCharge = false;
+            if (sDatabase.RunQuery(chargeRes,
+                "SELECT e.itemID FROM entity e"
+                " JOIN invTypes t ON t.typeID = e.typeID"
+                " JOIN invGroups g ON g.groupID = t.groupID"
+                " WHERE e.locationID = %u AND e.flag = %u AND g.categoryID = 8",
+                shipID, slotFlag))
+            {
+                DBResultRow chargeRow;
+                if (chargeRes.GetRow(chargeRow)) {
+                    chargeRef = sItemFactory.GetItemRef(chargeRow.GetUInt(0));
+                    if (chargeRef.get() != nullptr) {
+                        hasCharge = true;
+                        emDmg = chargeRef->GetAttribute(AttrEmDamage).get_float();
+                        therDmg = chargeRef->GetAttribute(AttrThermalDamage).get_float();
+                        kinDmg = chargeRef->GetAttribute(AttrKineticDamage).get_float();
+                        expDmg = chargeRef->GetAttribute(AttrExplosiveDamage).get_float();
+                    }
+                }
+            }
+            if (!hasCharge) {
+                // Civilian weapons have damage on the weapon itself
+                InventoryItemRef weapRef = sItemFactory.GetItemRef(moduleID);
+                if (weapRef.get() != nullptr) {
+                    emDmg = weapRef->GetAttribute(AttrEmDamage).get_float();
+                    therDmg = weapRef->GetAttribute(AttrThermalDamage).get_float();
+                    kinDmg = weapRef->GetAttribute(AttrKineticDamage).get_float();
+                    expDmg = weapRef->GetAttribute(AttrExplosiveDamage).get_float();
+                }
+            }
+            if (emDmg + therDmg + kinDmg + expDmg <= 0) {
+                resultMsg = "module has no damage attributes — cannot fire";
+                return false;
+            }
+
+            // Get weapon item for turret stats
+            InventoryItemRef weapRef = sItemFactory.GetItemRef(moduleID);
+            float dmgMult = 1.0f;
+            float optimal = 6000.0f;
+            float falloff = 2000.0f;
+            float tracking = 0.25f;
+            float sigRes = 40000.0f;
+            if (weapRef.get() != nullptr) {
+                if (weapRef->HasAttribute(AttrDamageMultiplier))
+                    dmgMult = weapRef->GetAttribute(AttrDamageMultiplier).get_float();
+                if (weapRef->HasAttribute(AttrMaxRange))
+                    optimal = weapRef->GetAttribute(AttrMaxRange).get_float();
+                if (weapRef->HasAttribute(AttrFalloff))
+                    falloff = weapRef->GetAttribute(AttrFalloff).get_float();
+                if (weapRef->HasAttribute(AttrTrackingSpeed))
+                    tracking = weapRef->GetAttribute(AttrTrackingSpeed).get_float();
+                if (weapRef->HasAttribute(AttrOptimalSigRadius))
+                    sigRes = weapRef->GetAttribute(AttrOptimalSigRadius).get_float();
+            }
+
+            // Apply range multiplier from charge (e.g. Radio crystals extend range)
+            if (hasCharge && chargeRef->HasAttribute(AttrWeaponRangeMultiplier)) {
+                float rangeMult = chargeRef->GetAttribute(AttrWeaponRangeMultiplier).get_float();
+                optimal *= rangeMult;
+                falloff *= rangeMult;
+            }
+
+            // Calculate to-hit using EVE turret formula (same as TurretFormulas::GetNPCToHit)
+            double distance = pAIShip->GetPosition().distance(pTarget->GetPosition());
+            GVector relVel = pTarget->GetVelocity() - pAIShip->GetVelocity();
+            double transV = relVel.length();
+            double angularVel = (distance > 1.0) ? (transV / distance) : 0;
+            float targetSig = pTarget->GetSelf()->GetAttribute(AttrSignatureRadius).get_float();
+            if (targetSig <= 0) targetSig = 100.0f;
+
+            float a = (tracking > 0) ? (float)(angularVel / tracking) : 0;
+            float b = (targetSig > 0) ? (sigRes / targetSig) : 1.0f;
+            float c = pow(a * b, 2.0f);
+            float rangeExcess = (float)std::max(0.0, distance - (double)optimal);
+            float e = (falloff > 0) ? pow(rangeExcess / falloff, 2.0f) : 0;
+            float chanceToHit = pow(0.5f, c + e);
+
+            float rNum = MakeRandomFloat(0.0f, 1.0f);
+            float toHit = 0.0f;
+            if (rNum <= 0.02f) toHit = 3.0f;                    // critical hit
+            else if (rNum < chanceToHit) toHit = rNum + 0.49f;  // normal hit
+            // else 0.0 = miss
+
+            // Apply weapon damage multiplier
+            emDmg *= dmgMult;
+            therDmg *= dmgMult;
+            kinDmg *= dmgMult;
+            expDmg *= dmgMult;
+
+            // Create Damage and apply (same pipeline as NPC AttackTarget)
+            Damage dmg(pAIShip, weapRef.get() ? weapRef : pAIShip->GetSelf(),
+                       kinDmg, therDmg, emDmg, expDmg, toHit,
+                       EVEEffectID::targetAttack);
+            bool killed = pTarget->ApplyDamage(dmg);
+
+            // Send turret visual effect to players in bubble
+            std::string effectGuid = "effects.Laser";
+            int32 cycleDuration = 3500;
+            if (weapRef.get() && weapRef->HasAttribute(AttrSpeed))
+                cycleDuration = (int32)weapRef->GetAttribute(AttrSpeed).get_float();
+            pAIShip->DestinyMgr()->SendSpecialEffect(
+                pAIShip->GetID(), moduleID, moduleTypeID, targetID,
+                hasCharge ? chargeRef->typeID() : 0,
+                effectGuid, 1, 1, 1, cycleDuration, 0, 0);
+
+            float totalDmg = (emDmg + therDmg + kinDmg + expDmg) * toHit;
+            sLog.Cyan("activate_module", "WEAPON char=%u %s → %s(%u) dist=%.0fm chance=%.1f%% toHit=%.2f dmg=%.1f%s",
+                charID, moduleName.c_str(), pTarget->GetName(), targetID, distance,
+                chanceToHit * 100.0f, toHit, totalDmg, killed ? " KILLED" : "");
+
+            char buf[300];
+            snprintf(buf, sizeof(buf), "weapon: %s fired at %s — dist:%.0fm, hit:%.0f%%, %s, dmg:%.1f%s",
+                     moduleName.c_str(), pTarget->GetName(), distance,
+                     chanceToHit * 100.0f,
+                     toHit > 2.5f ? "CRIT" : (toHit > 0 ? "HIT" : "MISS"),
+                     totalDmg,
+                     killed ? " — TARGET DESTROYED" : "");
+            resultMsg = buf;
+            return true;
         }
 
         // Verify target is an asteroid
