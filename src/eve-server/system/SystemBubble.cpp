@@ -210,13 +210,19 @@ void SystemBubble::ProcessWander(std::vector<SystemEntity *> &wanderers) {
         if (!InBubble(pDSE->GetPosition())) {
             wanderers.push_back(pDSE);
 
+            // See A371 Bug22.1 — Enhanced diagnostics for bubble ejection.
+            // Log entity position, bubble center, and distance to diagnose position drift.
+            GPoint ePos = pDSE->GetPosition();
+            double distFromCenter = m_center.distance(ePos);
             _log(
                 DESTINY__WARNING,
-                "SystemBubble::ProcessWander() - entity %u(sys:%u) not in bubble %u for systemID %u.",
-                pDSE->GetID(),
-                pDSE->SystemMgr()->GetID(),
-                m_bubbleID,
-                m_systemID
+                "SystemBubble::ProcessWander() - entity %s(%u) not in bubble %u (sys:%u). "
+                "EntityPos(%.0f,%.0f,%.0f) BubbleCenter(%.0f,%.0f,%.0f) dist=%.0fm radius=%.0fm",
+                pDSE->GetName(), pDSE->GetID(),
+                m_bubbleID, m_systemID,
+                ePos.x, ePos.y, ePos.z,
+                m_center.x, m_center.y, m_center.z,
+                distFromCenter, m_radius
             );
 
             itr = m_dynamicEntities.erase(itr);

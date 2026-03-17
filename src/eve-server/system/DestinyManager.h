@@ -148,6 +148,7 @@ public:
 
     /* Ship State Query functions */
     bool IsMoving()                                     { return (m_timeFraction > 0); }
+    GPoint GetOrbitCenter()                              { return m_orbitCenter; }
 
     /* Movement checks */
     bool IsAligned(GPoint &targetPoint);
@@ -349,6 +350,13 @@ private:
     double m_inclination;               //inclination of orbit
     double m_longAscNode;               //longitude of ascending node
     void ClearOrbit();
+
+    // See A371 Bug22.1 — Orbit center tracking to prevent mutual-orbit feedback drift.
+    // When two entities orbit each other, reading each other's orbit-displaced positions
+    // each tick creates a positive feedback loop that can displace entities hundreds of km
+    // in under a minute. m_orbitCenter tracks a clamped orbit center that moves at most
+    // at the target's physical speed, breaking the feedback loop.
+    GPoint m_orbitCenter;
 
     // Internal Warp Methods
     Timer m_warpTimer;

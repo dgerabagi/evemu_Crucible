@@ -120,6 +120,7 @@ mvPacket(nullptr)
 
     m_inclination = 0;
     m_longAscNode = 0;
+    m_orbitCenter = NULL_ORIGIN;
 
     m_stateStamp = 0;
 }
@@ -153,6 +154,24 @@ void DestinyManager::Process() {
 
 void DestinyManager::ProcessState() {
     using namespace Destiny;
+
+    // See A371 Bug22.1 — Per-tick position tracking for player ships.
+    // Fires REGARDLESS of ball mode so we catch drift even in STOP mode.
+    // This is critical for diagnosing the 217km+ desync — without this,
+    // STOP-mode entities produce zero orbit/move logs.
+    if (mySE->HasPilot() && is_log_enabled(DESTINY__MOVE_TRACE)) {
+        GPoint bCenter = (mySE->SysBubble() != nullptr) ? mySE->SysBubble()->GetCenter() : NULL_ORIGIN;
+        double distFromBubble = m_position.distance(bCenter);
+        _log(DESTINY__MOVE_TRACE, "PT - %s(%u): mode=%u orbiting=%d pos=(%.0f,%.0f,%.0f) vel=(%.1f,%.1f,%.1f) "
+            "tf=%.4f asf=%.4f maxSpd=%.1f maxShipSpd=%.1f distBubble=%.0f",
+            mySE->GetName(), mySE->GetID(),
+            m_ballMode, m_orbiting,
+            m_position.x, m_position.y, m_position.z,
+            m_velocity.x, m_velocity.y, m_velocity.z,
+            m_timeFraction, m_activeSpeedFraction,
+            m_maxSpeed, m_maxShipSpeed, distFromBubble);
+    }
+
     switch(m_ballMode) {
         case Ball::Mode::STOP: {
             // See A371 Bug18 — Post-warp position correction.
@@ -595,6 +614,9 @@ void DestinyManager::Halt() {
     m_targetEntity.second = nullptr;
 
     ClearTurn();
+    // See A371 Bug22.1 — Clear orbit state on halt to prevent stale m_orbiting
+    // values from persisting across state transitions (e.g., orbit → warp → stop).
+    ClearOrbit();
 
     if (is_log_enabled(DESTINY__MOVE_TRACE))
         _log(DESTINY__MOVE_TRACE, "Destiny::Halt() - %s(%u): m_shipHeading: %.3f,%.3f,%.3f", \
@@ -913,11 +935,47 @@ void DestinyManager::MoveObject() {
     // When two entities orbit each other (player↔NPC), this error feeds back: each entity's
     // orbit center uses the other's displaced position, accumulating drift at ~(v1+v2) m/s.
     // Over 87 seconds of combat at ~645 m/s combined, this produced the observed 53km desync.
+    GPoint newPos;
     if (m_orbiting > 0 && m_orbiting < Destiny::Ball::Orbit::TooClose) {
         // Position already set by Orbit(); don't add velocity.
-        SetPosition(m_position, sConfig.debug.PositionHack || forceSync);
+        newPos = m_position;
     } else {
-        SetPosition(m_position + m_velocity, sConfig.debug.PositionHack || forceSync);
+        newPos = m_position + m_velocity;
+    }
+
+    // See A371 Bug22.1 — Position sanity guard.
+    // NaN/INF from arithmetic anomalies (e.g., NPC with speed=0 causing 0/0) would
+    // corrupt position permanently. Catch and reset to previous position.
+    if (std::isnan(newPos.x) || std::isnan(newPos.y) || std::isnan(newPos.z)
+        || std::isinf(newPos.x) || std::isinf(newPos.y) || std::isinf(newPos.z)) {
+        sLog.Error("Destiny::MoveObject()", "%s(%u) - NaN/INF position detected! "
+            "vel=(%.1f,%.1f,%.1f) head=(%.3f,%.3f,%.3f) speed=%.1f orbiting=%d",
+            mySE->GetName(), mySE->GetID(),
+            m_velocity.x, m_velocity.y, m_velocity.z,
+            m_shipHeading.x, m_shipHeading.y, m_shipHeading.z,
+            speed, m_orbiting);
+        // Don't update position — keep previous valid position
+    } else {
+        // See A371 Bug22.1 — Hard displacement clamp for non-warp movement.
+        // Maximum legitimate per-tick displacement is ~5000 m/s (fast interceptor + MWD).
+        // Anything beyond 50km/tick (50,000 m) is almost certainly a bug.
+        double displacement = m_position.distance(newPos);
+        if (displacement > 50000.0 && m_ballMode != Destiny::Ball::Mode::WARP) {
+            sLog.Error("Destiny::MoveObject()", "%s(%u) - EXCESSIVE displacement: %.0fm in 1 tick! "
+                "mode=%u orbiting=%d vel=(%.1f,%.1f,%.1f) speed=%.1f maxShipSpd=%.1f "
+                "oldPos=(%.0f,%.0f,%.0f) newPos=(%.0f,%.0f,%.0f)",
+                mySE->GetName(), mySE->GetID(), displacement,
+                m_ballMode, m_orbiting,
+                m_velocity.x, m_velocity.y, m_velocity.z,
+                speed, m_maxShipSpeed,
+                m_position.x, m_position.y, m_position.z,
+                newPos.x, newPos.y, newPos.z);
+            // Clamp: move at most 50km in the computed direction
+            GVector dir(m_position, newPos);
+            dir.normalize();
+            newPos = m_position + (dir * 50000.0);
+        }
+        SetPosition(newPos, sConfig.debug.PositionHack || forceSync);
     }
 
     // Note: post-warp position correction moved to ProcessState STOP handler (Bug 18).
@@ -1260,7 +1318,58 @@ void DestinyManager::Orbit() {
     uint32 timeStamp = sEntityList.GetStamp() - m_stateStamp;
     float Tr = m_targetEntity.second->GetRadius();
     //float Tm = m_targetEntity.second->GetSelf()->GetAttribute(AttrMass).get_float();
-    GPoint Tp(m_targetEntity.second->GetPosition());
+
+    // See A371 Bug22.1 — Break mutual-orbit feedback loop.
+    // When two entities orbit each other, each reads the other's orbit-displaced position
+    // (target.pos = target.orbitCenter + target.orbitOffset). This creates a positive feedback
+    // loop where orbit centers drift apart at hundreds of km per minute.
+    // Fix: when detecting mutual orbit (target orbits us AND we orbit target), read the
+    // target's ORBIT CENTER instead of its displaced position. This breaks the feedback loop
+    // because orbit centers track each other directly without orbit displacement.
+    // Rate clamp remains as a safety net for edge cases.
+    {
+        GPoint rawTp;
+        DestinyManager* targetDM = m_targetEntity.second->DestinyMgr();
+        bool mutualOrbit = false;
+        if (targetDM != nullptr && targetDM->IsOrbiting()
+            && targetDM->GetTargetID() == mySE->GetID()) {
+            // Mutual orbit detected: use target's orbit CENTER, not orbit-displaced position.
+            // This eliminates the feedback loop entirely for mutual orbit scenarios.
+            rawTp = targetDM->GetOrbitCenter();
+            mutualOrbit = true;
+        } else {
+            rawTp = m_targetEntity.second->GetPosition();
+        }
+        // Rate clamp: limit orbit center movement to target's physical max speed.
+        // Catches any remaining edge cases (e.g., delayed position updates, warp exits).
+        double maxTargetSpeed = 100.0;
+        if (targetDM != nullptr)
+            maxTargetSpeed = std::max(maxTargetSpeed, (double)targetDM->GetMaxVelocity() * 1.5);
+        GVector tpDelta(m_orbitCenter, rawTp);
+        double tpMoved = tpDelta.length();
+        bool clamped = false;
+        if (tpMoved > maxTargetSpeed && tpMoved > 0.01) {
+            tpDelta.normalize();
+            m_orbitCenter = m_orbitCenter + (tpDelta * maxTargetSpeed);
+            clamped = true;
+        } else {
+            m_orbitCenter = rawTp;
+        }
+
+        // See A371 Bug22.1 — Diagnostic: log orbit center drift every tick.
+        // This captures the data needed to diagnose position desync.
+        if (is_log_enabled(DESTINY__ORBIT_TRACE))
+            _log(DESTINY__ORBIT_TRACE, "OC - %s(%u): mutual=%s targetMode=%u targetMaxV=%.0f "
+                "rawTp=(%.0f,%.0f,%.0f) oc=(%.0f,%.0f,%.0f) tpMoved=%.1f clamp=%s maxClamp=%.0f",
+                mySE->GetName(), mySE->GetID(),
+                (mutualOrbit ? "YES" : "NO"),
+                (targetDM ? targetDM->GetState() : 99),
+                (targetDM ? targetDM->GetMaxVelocity() : 0.0),
+                rawTp.x, rawTp.y, rawTp.z,
+                m_orbitCenter.x, m_orbitCenter.y, m_orbitCenter.z,
+                tpMoved, (clamped ? "YES" : "NO"), maxTargetSpeed);
+    }
+    GPoint Tp(m_orbitCenter);
 
     // current and edges are used to determine ship's orbit distance, and adjust position accordingly
     double centers(m_position.distance(Tp));
@@ -1372,6 +1481,15 @@ void DestinyManager::Orbit() {
     mPos += Tp;
     // set position for this tic
     m_position = mPos;
+
+    // See A371 Bug22.1 — Position sanity check.
+    // Guard against NaN from edge cases (e.g., NPC with speed=0 producing NaN in orbit fractions)
+    // or any other arithmetic anomaly that could corrupt position.
+    if (std::isnan(m_position.x) || std::isnan(m_position.y) || std::isnan(m_position.z)) {
+        sLog.Error("Destiny::Orbit()", "%s(%u) - NaN position detected! Resetting to orbit center.",
+            mySE->GetName(), mySE->GetID());
+        m_position = Tp;
+    }
 
     // set heading for this tic
     GPoint mPosNext(NULL_ORIGIN);
@@ -1498,6 +1616,7 @@ void DestinyManager::ClearOrbit() {
     m_targetDistance = 0;
     m_followDistance = 0;
     m_maxOrbitSpeedFraction = 1.0f;
+    m_orbitCenter = NULL_ORIGIN;
 }
 
 void DestinyManager::InitWarp() {
@@ -2358,6 +2477,10 @@ void DestinyManager::Orbit(SystemEntity *pSE, uint32 distance/*0*/) {
     m_targetEntity.second = pSE;
     m_targetPoint = pSE->GetPosition();
     m_targetDistance = static_cast<double>(distance);
+    // See A371 Bug22.1 — Initialize orbit center to target's current position.
+    // This is the "ground truth" position at orbit start, before any mutual-orbit
+    // feedback can accumulate.
+    m_orbitCenter = pSE->GetPosition();
     BeginMovement();
 
     // See A371 Bug22 — BeginMovement() resets accel/decel/turn flags to false, but nothing
@@ -2403,9 +2526,23 @@ void DestinyManager::Orbit(SystemEntity *pSE, uint32 distance/*0*/) {
     m_followDistance =  std::sqrt(four + (24 *  std::pow(Rc, 4) / six) + 12 * Rc2) / 6;
 
     double velocity = m_maxShipSpeed * ((distance / m_followDistance) + 0.065); // dunno where i got this from but seems to work very well.
-    m_maxOrbitSpeedFraction = velocity / m_maxShipSpeed;
+    // See A371 Bug22.1 — Guard against m_maxShipSpeed == 0 causing NaN (0/0).
+    // NPC's SetMaxVelocity() caps speed against AttrMaxVelocity which can be 0 for some NPCs,
+    // making m_maxShipSpeed = 0. This would cause m_maxOrbitSpeedFraction = NaN.
+    if (m_maxShipSpeed > 0.01) {
+        m_maxOrbitSpeedFraction = velocity / m_maxShipSpeed;
+    } else {
+        sLog.Error("Destiny::Orbit()", "%s(%u) - m_maxShipSpeed is %.4f (near-zero)! "
+            "Setting m_maxOrbitSpeedFraction to 1.0 to prevent NaN. distance=%u",
+            mySE->GetName(), mySE->GetID(), m_maxShipSpeed, distance);
+        m_maxOrbitSpeedFraction = 1.0f;
+        velocity = 100.0; // fallback orbit speed
+    }
 
     double circ = EvE::Trig::Pi2 * m_followDistance;
+    // Guard against velocity == 0 causing INF orbit time
+    if (velocity < 0.01)
+        velocity = 100.0;
     m_orbitTime = circ / velocity;
     m_orbitRadTic = EvE::Trig::Pi2 / m_orbitTime;
 
