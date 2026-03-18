@@ -1437,7 +1437,10 @@ void DestinyManager::Orbit() {
         m_orbiting = Destiny::Ball::Orbit::Far;
         // fudge distance for a smaller orbit
         // modify this based on calculated distance
-        mPosAdj = -m_followDistance / 25;
+        // See A371 Bug22.2 — CRITICAL FIX: m_followDistance is uint32. Unary negation on
+        // unsigned int wraps to ~4.29 billion, producing orbit radius of 172 million meters
+        // instead of ~5000m. This was the root cause of the 217,000 km slingshot bug.
+        mPosAdj = -static_cast<float>(m_followDistance) / 25.0f;
         _log(DESTINY__ORBIT_TRACE, "2 - too far");
     } else if (centers < m_followDistance) {
         m_orbiting = Destiny::Ball::Orbit::Close;
@@ -1452,8 +1455,11 @@ void DestinyManager::Orbit() {
 
     #define LogMacro(v) _log(DESTINY__ORBIT_TRACE, "m - " #v ": (%.3f, %.3f, %.3f)   len=%.3f", v.x, v.y, v.z, v.length())
 
+    // See A371 Bug22.2 — Save position before orbit math for displacement safety check.
+    GPoint preOrbitPos(m_position);
+
     // new orbit code
-    float radius = m_followDistance + mPosAdj;// fudge a bit as using targetDistance is a hair too close
+    float radius = static_cast<float>(m_followDistance) + mPosAdj;// fudge a bit as using targetDistance is a hair too close
     // angle around y axis (from +x) - horizontal movement  - ccw from +x using ships orbit in rad/tic
     float theta = EvE::Trig::Pi2 - EvE::Trig::Deg2Rad(360) - (m_orbitRadTic * timeStamp);
     // angle around xz axis (from 0) - vertical movement
@@ -1489,6 +1495,17 @@ void DestinyManager::Orbit() {
         sLog.Error("Destiny::Orbit()", "%s(%u) - NaN position detected! Resetting to orbit center.",
             mySE->GetName(), mySE->GetID());
         m_position = Tp;
+    }
+
+    // See A371 Bug22.2 — Orbit displacement safety guard.
+    // If orbit math placed us more than 50km from our previous position in a single tick,
+    // something is wrong (e.g., unsigned negation overflow in radius). Revert to pre-orbit position.
+    double orbitDisplacement = preOrbitPos.distance(m_position);
+    if (orbitDisplacement > 50000.0) {
+        sLog.Error("Destiny::Orbit()", "%s(%u) - ORBIT SLINGSHOT: %.0fm displacement in 1 tick! "
+            "radius=%.1f mPosAdj=%.1f followDist=%u. Reverting to pre-orbit position.",
+            mySE->GetName(), mySE->GetID(), orbitDisplacement, radius, mPosAdj, m_followDistance);
+        m_position = preOrbitPos;
     }
 
     // set heading for this tic
