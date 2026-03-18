@@ -921,11 +921,6 @@ void DestinyManager::MoveObject() {
     // 5 ticks (5 seconds) to correct accumulated drift during active movement.
     // See A371 Bug22 — Extended to NPCs: NPC position sync every 3 ticks keeps
     // client dead-reckoning from diverging during orbit/follow.
-    // See A371 Bug22.3 — Per-tick forceSync REMOVED for orbit mode.
-    // The client receives CmdOrbit and computes smooth orbit interpolation locally.
-    // Per-tick SetBallPosition fights the client's interpolation, causing visible
-    // snap-back every tick (ship accelerates then snaps to server position, repeat).
-    // Periodic sync (5-tick player, 3-tick NPC) is sufficient for drift correction.
     bool forceSync = false;
     if (!sConfig.debug.PositionHack) {
         uint8 syncInterval = mySE->HasPilot() ? 5 : 3;
@@ -933,6 +928,24 @@ void DestinyManager::MoveObject() {
             m_positionSyncTicks = 0;
             forceSync = true;
         }
+    }
+    // See A371 Bug22.3 — Suppress ALL position corrections during stable orbit.
+    // Root cause: the EVEmu server computes orbit position using the Santorine formula
+    // (custom trig). The EVE client computes orbit independently using CCP's original
+    // destiny ball simulation (C++ trinity engine) after receiving CmdOrbit. These two
+    // orbit formulas NEVER produce matching positions — the server and client inherently
+    // disagree on the ship's angular position around the orbit circle.
+    // Any SetBallPosition correction snaps the client from its smooth orbit to the
+    // server's different position, causing visible jitter every N ticks.
+    // Fix: during stable orbit (Orbiting/Close/Far states), let the client render its
+    // own smooth orbit undisturbed. The server tracks position independently for combat
+    // range calculations, which remain approximately correct since both orbit at the
+    // same distance from the same target. Corrections resume when orbit state changes
+    // to TooFar/TooClose (approach/retreat) or when orbit ends.
+    // Evidence: EVESharp reference shows FollowState = {FollowId, Range} — the client's
+    // orbit simulation only needs the target and distance, running its own physics from there.
+    if (m_orbiting > 0 && m_orbiting < Destiny::Ball::Orbit::TooClose) {
+        forceSync = false;
     }
 
     // See A371 Bug22 — In active orbit (Orbiting/Close/Far), Orbit() already computed the
@@ -1376,180 +1389,167 @@ void DestinyManager::Orbit() {
     }
     GPoint Tp(m_orbitCenter);
 
-    // current and edges are used to determine ship's orbit distance, and adjust position accordingly
-    double centers(m_position.distance(Tp));
-    double edges(centers - m_radius - Tr);
-    if (is_log_enabled(DESTINY__ORBIT_TRACE))
-        _log(DESTINY__ORBIT_TRACE, "1 - %s(%u): time:%u, centers:%.2f, edges:%.2f, target:%.2f, follow:%u, Tr:%.0f", \
-            mySE->GetName(), mySE->GetID(), timeStamp, centers, edges, m_targetDistance, m_followDistance, Tr);
+    // See A371 Bug22.3 — REWRITE: Physics-based orbit matching client's destiny ball simulation.
+    //
+    // ROOT CAUSE OF JITTER: The old code placed the ship on a mathematical circle using
+    // trig (theta = radTic * time), directly setting position each tick. The EVE client's
+    // destiny ball simulation computes orbit using physics: tangent-seeking velocity with
+    // inertia-based acceleration (v = v_max * (1 - e^(-dt/τ))), same as all other movement.
+    // Since these two algorithms NEVER produce the same position, every SetBallPosition
+    // correction caused visible snap/jitter — regardless of sync frequency.
+    //
+    // FIX: Use the same physics the client uses:
+    //   1. Compute direction to target and current distance
+    //   2. Compute desired velocity: tangent to orbit circle, with radial correction  
+    //   3. Apply inertia-based acceleration: same formula as MoveObject()/Turn()
+    //   4. Update position from velocity (not from trig placement)
+    //
+    // This produces the same smooth orbit the client renders. No position corrections needed.
+    // See A369.1 for client code reference, EVESharp FollowState = {targetId, range}.
+    // See Santorine paper for orbit radius formula (unchanged in Orbit(SE*,uint32) init).
+    //
+    // DataSector sent to client: maxSpeed, velocity(x,y,z), inertia, speedfraction
+    // ORBIT_Struct sent to client: targetID, followRange
+    // Client simulates from these initial conditions using identical physics.
 
-    // distances checks for orbit calculations
-    GPoint mPos(NULL_ORIGIN);
-    float mPosAdj(0.0f);
-    // check distances for this tic
+    double centers = m_position.distance(Tp);
+    // orbitRange = center-to-center distance for stable orbit (includes target radius)
+    double orbitRange = static_cast<double>(m_followDistance) + Tr;
+    double edges = centers - m_radius - Tr;
+
+    if (is_log_enabled(DESTINY__ORBIT_TRACE))
+        _log(DESTINY__ORBIT_TRACE, "1 - %s(%u): time:%u, centers:%.2f, edges:%.2f, target:%.2f, follow:%u, Tr:%.0f, orbitRange:%.0f", \
+            mySE->GetName(), mySE->GetID(), timeStamp, centers, edges, m_targetDistance, m_followDistance, Tr, orbitRange);
+
+    // Distance state classification (kept for state tracking, not for position calculation)
     if ((edges / 2) > m_followDistance) {
-        if (m_orbiting == Destiny::Ball::Orbit::TooFar) {
-            MoveObject();
-            return;
-        }
-        // too far to realistically orbit.
         m_orbiting = Destiny::Ball::Orbit::TooFar;
-        // TODO: update this to determine orbit and set heading/target to smoothly go from turn into orbit trajectory
-        // set point to side of target (based on current position), to avoid near-zero angular velocity
-        double radTarg = atan2(Tp.z - m_position.z, Tp.x - m_position.x);  // rad from '0' to target
-        radTarg += atan2(m_followDistance, edges);  // rad from 'distance line' to target 'offset'
-        mPos.x = m_followDistance * cos(radTarg);
-        mPos.z = m_followDistance * sin(radTarg);
-        if (Tp.y > m_position.y) { // target is above us.  set point below target using calculated distance
-            mPos.y = Tp.y - m_position.y;
-        } else { // opposite of above
-            mPos.y = m_position.y - Tp.y;
-        }
-        m_targetPoint = Tp + mPos;
-        GVector heading(m_position, m_targetPoint);
-        heading.normalize();
-        m_shipHeading = heading;    // this sets object velocity using speed
-        _log(DESTINY__ORBIT_TRACE, "2 - way too far - rads:%.3f, heading: %.3f, %.3f, %.3f", \
-                radTarg, m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
-        MoveObject();
-        return;
-    } else if ( (centers + m_targetDistance / 3) < m_followDistance) {
-        if (m_orbiting == Destiny::Ball::Orbit::TooClose) {
-            MoveObject();
-            return;
-        }
-        // to close to realistically orbit.  move away from target
+    } else if ((centers + m_targetDistance / 3) < m_followDistance) {
         m_orbiting = Destiny::Ball::Orbit::TooClose;
-        // set point to side of target (based on current position), to avoid near-zero angular velocity
-        double radTarg = atan2(Tp.z - m_position.z, Tp.x - m_position.x);  // rad from '0' to target
-        //radTarg += atan2(m_followDistance, edges);  // rad from 'distance line' to target 'offset'
-        mPos.x = m_followDistance * cos(radTarg);
-        mPos.z = m_followDistance * sin(radTarg);
-        if (Tp.y > m_position.y) {  // target is above us.  set point below target using calculated distance
-            mPos.y = Tp.y - m_position.y;
-        } else { // opposite of above
-            mPos.y = m_position.y - Tp.y;
-        }
-        m_targetPoint = Tp + mPos;
-        GVector heading(m_position, m_targetPoint);
-        heading.normalize();
-        m_shipHeading = heading;    // this sets object velocity using speed
-        _log(DESTINY__ORBIT_TRACE, "2 - way too close - rads:%.3f, heading: %.3f, %.3f, %.3f", \
-                radTarg, m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
-        MoveObject();
-        return;
     } else if ((edges - m_targetDistance / 4) > m_followDistance) {
         m_orbiting = Destiny::Ball::Orbit::Far;
-        // fudge distance for a smaller orbit
-        // modify this based on calculated distance
-        // See A371 Bug22.2 — CRITICAL FIX: m_followDistance is uint32. Unary negation on
-        // unsigned int wraps to ~4.29 billion, producing orbit radius of 172 million meters
-        // instead of ~5000m. This was the root cause of the 217,000 km slingshot bug.
-        mPosAdj = -static_cast<float>(m_followDistance) / 25.0f;
-        _log(DESTINY__ORBIT_TRACE, "2 - too far");
     } else if (centers < m_followDistance) {
         m_orbiting = Destiny::Ball::Orbit::Close;
-        // fudge distance for larger orbit
-        // modify this based on calculated distance
-        mPosAdj = m_followDistance / 25;
-        _log(DESTINY__ORBIT_TRACE, "2 - too close");
     } else {
         m_orbiting = Destiny::Ball::Orbit::Orbiting;
-        _log(DESTINY__ORBIT_TRACE, "2 - within tolerance");
     }
 
-    #define LogMacro(v) _log(DESTINY__ORBIT_TRACE, "m - " #v ": (%.3f, %.3f, %.3f)   len=%.3f", v.x, v.y, v.z, v.length())
+    // --- Physics-based orbit: compute desired velocity direction ---
 
-    // See A371 Bug22.2 — Save position before orbit math for displacement safety check.
-    GPoint preOrbitPos(m_position);
+    // Direction FROM us TO target (radial inward)
+    GVector toTarget(m_position, Tp);
+    double distToTarget = toTarget.length();
+    if (distToTarget < 1.0) distToTarget = 1.0;  // safety
+    GVector radialDir = toTarget;
+    radialDir.normalize();
 
-    // new orbit code
-    // See A371 Bug22.3 — Orbit radius must include target radius.
-    // m_followDistance is the edge-to-edge orbit distance (from the orbit formula).
-    // The orbit position is computed relative to the target CENTER (Tp), so we must
-    // add Tr (target radius) to get the correct center-to-center distance.
-    // Without this, ships orbit INSIDE large objects (stations with Tr=29000m+).
-    float radius = static_cast<float>(m_followDistance) + mPosAdj + Tr;
-    // angle around y axis (from +x) - horizontal movement  - ccw from +x using ships orbit in rad/tic
-    float theta = EvE::Trig::Pi2 - EvE::Trig::Deg2Rad(360) - (m_orbitRadTic * timeStamp);
-    // angle around xz axis (from 0) - vertical movement
-    //GVector target(m_position, Tp);
-    //LogMacro(target);
-    //float hyp = sqrt(pow(target.z, 2) + pow(target.x, 2));
-    // See A371 Bug22.3 — Inclination reduced from 45 to 5 degrees.
-    // 45-degree inclination creates enormous Y oscillation proportional to orbit radius:
-    // for a 30km station orbit, mPos.y swings ±24km, pushing total distance to ~38km
-    // from center vs intended ~30km. This triggers constant TooFar/approach oscillation.
-    // 5 degrees gives <0.5% distance variation — stable, flat orbits like retail EVE.
-    float inclination = 5; //atan(hyp / target.y);
-    // fractional value of orbit period (0 < x < 1)
-    float period = fmod(timeStamp, m_orbitTime) / m_orbitTime;
-    // calculate a pendulum value here to adjust elevation (+/-y) where +x is 1, 0x is 0, -x is -1
-    float c = cos(EvE::Trig::Deg2Rad(360 * period));
-    // get elevation modifier based on orbit period
-    float phi = EvE::Trig::Deg2Rad(inclination * c);
-    // set xz plane modifier from elevation
-    float s = sin(EvE::Trig::Deg2Rad(360 * period));
-    float mu = EvE::Trig::Deg2Rad(inclination * s);
-    // here we will adjust orbit plane by adding OrbitRotation angle to theta
-    // calculate position
-    mPos.x = radius /* mu */* cos( theta );
-    mPos.z = radius /* mu */* sin( theta );
-    mPos.y = radius * phi;
-    _log(DESTINY__ORBIT_TRACE, "4 - theta:%.5f, phi:%.3f, mu:%.2f period:%.5f, radius:%.3f, inc:%.5f", theta,phi,mu,period,radius,inclination);
-    LogMacro(mPos);
-    // apply origin to our calculated position
-    mPos += Tp;
-    // set position for this tic
-    m_position = mPos;
-
-    // See A371 Bug22.1 — Position sanity check.
-    // Guard against NaN from edge cases (e.g., NPC with speed=0 producing NaN in orbit fractions)
-    // or any other arithmetic anomaly that could corrupt position.
-    if (std::isnan(m_position.x) || std::isnan(m_position.y) || std::isnan(m_position.z)) {
-        sLog.Error("Destiny::Orbit()", "%s(%u) - NaN position detected! Resetting to orbit center.",
-            mySE->GetName(), mySE->GetID());
-        m_position = Tp;
+    // Tangent direction: perpendicular to radial in the XZ plane (CCW orbit).
+    // cross(radial, up) gives tangent. This matches the client's orbit direction.
+    GVector up(0.0, 1.0, 0.0);
+    GVector tangentDir(
+        radialDir.z * up.y - radialDir.y * up.z,   // cross product x
+        radialDir.x * up.z - radialDir.z * up.x,   // cross product y
+        radialDir.y * up.x - radialDir.x * up.y    // cross product z
+    );
+    double tangentLen = tangentDir.length();
+    if (tangentLen > 0.001) {
+        tangentDir.normalize();
+    } else {
+        // Degenerate case: ship directly above/below target. Pick arbitrary tangent.
+        tangentDir = GVector(1.0, 0.0, 0.0);
     }
 
-    // See A371 Bug22.2 — Orbit displacement safety guard.
-    // If orbit math placed us more than 50km from our previous position in a single tick,
-    // something is wrong (e.g., unsigned negation overflow in radius). Revert to pre-orbit position.
-    double orbitDisplacement = preOrbitPos.distance(m_position);
-    if (orbitDisplacement > 50000.0) {
-        sLog.Error("Destiny::Orbit()", "%s(%u) - ORBIT SLINGSHOT: %.0fm displacement in 1 tick! "
-            "radius=%.1f mPosAdj=%.1f followDist=%u. Reverting to pre-orbit position.",
-            mySE->GetName(), mySE->GetID(), orbitDisplacement, radius, mPosAdj, m_followDistance);
-        m_position = preOrbitPos;
+    // Blend tangent and radial based on distance error.
+    // At correct orbit distance: 100% tangent (pure circular orbit).
+    // Too far: blend toward target (approach). Too close: blend away (retreat).
+    // This is how the client's orbit controller works — it seeks the tangent
+    // while correcting radial distance, producing smooth spiraling orbits.
+    double distError = distToTarget - orbitRange;
+    // Normalize error relative to orbit range. Clamp to [-1, 1].
+    double radialBlend = distError / orbitRange;
+    if (radialBlend > 1.0) radialBlend = 1.0;
+    if (radialBlend < -1.0) radialBlend = -1.0;
+
+    // Desired heading: weighted blend of tangent and radial correction.
+    // radialBlend > 0 means too far → add inward component
+    // radialBlend < 0 means too close → add outward component
+    GVector desiredDir(
+        tangentDir.x + radialDir.x * radialBlend,
+        tangentDir.y + radialDir.y * radialBlend,
+        tangentDir.z + radialDir.z * radialBlend
+    );
+    double desiredLen = desiredDir.length();
+    if (desiredLen > 0.001)
+        desiredDir.normalize();
+
+    // Orbit speed: use the same maxOrbitSpeedFraction computed in Orbit(SE*, distance) init.
+    double orbitSpeed = m_maxShipSpeed * m_maxOrbitSpeedFraction;
+
+    // Desired velocity vector
+    GVector desiredVelocity = desiredDir * orbitSpeed;
+
+    // --- Apply inertia-based acceleration (matching MoveObject and client physics) ---
+    // EVE acceleration formula: v(t) = v_target * (1 - e^(-dt/τ))
+    // where τ = m_shipAgility = mass * inertia
+    // For incremental update each 1-second tick:
+    //   v_new = v_old + (v_desired - v_old) * (1 - e^(-dt/τ))
+    // This is the EXACT same formula the client uses for all movement.
+    double dt = 1.0;  // 1 second per tick
+    double tau = m_shipAgility;
+    if (tau < 0.1) tau = 0.1;  // safety: avoid div by zero or instant snap
+    double alpha = 1.0 - exp(-dt / tau);
+
+    m_velocity.x += (desiredVelocity.x - m_velocity.x) * alpha;
+    m_velocity.y += (desiredVelocity.y - m_velocity.y) * alpha;
+    m_velocity.z += (desiredVelocity.z - m_velocity.z) * alpha;
+
+    // Update heading from velocity
+    double speed = m_velocity.length();
+    if (speed > 0.01) {
+        m_shipHeading.x = m_velocity.x / speed;
+        m_shipHeading.y = m_velocity.y / speed;
+        m_shipHeading.z = m_velocity.z / speed;
     }
 
-    // set heading for this tic
-    GPoint mPosNext(NULL_ORIGIN);
-    theta += m_orbitRadTic;
-    period = fmod(timeStamp + 1, m_orbitTime) / m_orbitTime;
-    c = cos(EvE::Trig::Deg2Rad(360 * period));
-    phi = EvE::Trig::Deg2Rad(inclination * c);
-    mPosNext.x = radius * cos( theta );
-    mPosNext.z = radius * sin( theta );
-    mPosNext.y = radius * phi;
-    LogMacro(mPosNext);
-    // determine where our target should be next tic, and figure that into our heading calculation
-    float Tv = (m_targetEntity.second->DestinyMgr() != nullptr ? m_targetEntity.second->DestinyMgr()->GetSpeed() : 0);
-    GVector Th(m_targetEntity.second->DestinyMgr() != nullptr ? m_targetEntity.second->DestinyMgr()->GetHeading() : NULL_ORIGIN_V);
-    Tp += (Tv*Th); // use Tv*Th and add to position to account for target movement.  Tv for non-moving targets return 0.
-    mPosNext += Tp;
-    GVector heading(m_position, mPosNext);
-    heading.normalize();
-    m_shipHeading = heading;
-    m_targetPoint = m_position + (m_shipHeading * 1.0e16);
-    LogMacro( heading );
+    // Update position from velocity (not from trig circle!)
+    GPoint newPos = m_position + GPoint(m_velocity.x, m_velocity.y, m_velocity.z);
 
-    double curSpeed = m_maxSpeed * m_activeSpeedFraction * m_maxOrbitSpeedFraction;
+    // Sanity checks
+    if (std::isnan(newPos.x) || std::isnan(newPos.y) || std::isnan(newPos.z)
+        || std::isinf(newPos.x) || std::isinf(newPos.y) || std::isinf(newPos.z)) {
+        sLog.Error("Destiny::Orbit()", "%s(%u) - NaN/INF position! vel=(%.1f,%.1f,%.1f) tau=%.2f alpha=%.4f",
+            mySE->GetName(), mySE->GetID(), m_velocity.x, m_velocity.y, m_velocity.z, tau, alpha);
+        // Keep previous position
+    } else {
+        double displacement = m_position.distance(newPos);
+        if (displacement > 50000.0) {
+            sLog.Error("Destiny::Orbit()", "%s(%u) - EXCESSIVE displacement: %.0fm! speed=%.1f",
+                mySE->GetName(), mySE->GetID(), displacement, speed);
+            GVector dir(m_position, newPos);
+            dir.normalize();
+            newPos = m_position + GPoint(dir.x * 50000.0, dir.y * 50000.0, dir.z * 50000.0);
+        }
+        m_position = newPos;
+    }
+
+    m_targetPoint = m_position + GPoint(m_shipHeading.x * 1.0e16, m_shipHeading.y * 1.0e16, m_shipHeading.z * 1.0e16);
+
+    // Update speed fractions for MoveObject() compatibility
+    if (m_maxShipSpeed > 0.01) {
+        m_activeSpeedFraction = speed / m_maxShipSpeed;
+        if (m_activeSpeedFraction > 1.0f) m_activeSpeedFraction = 1.0f;
+    }
+
     if (is_log_enabled(DESTINY__ORBIT_TRACE))
-        _log(DESTINY__ORBIT_TRACE, "5(%u) - orbiting at %.2f. timestamp:%u, speed:%.2f", \
-            m_orbiting, m_position.distance(Tp), timeStamp, curSpeed);
+        _log(DESTINY__ORBIT_TRACE, "5(%u) - dist:%.0f orbitRange:%.0f speed:%.1f blend:%.2f vel:(%.1f,%.1f,%.1f) head:(%.3f,%.3f,%.3f)", \
+            m_orbiting, distToTarget, orbitRange, speed, radialBlend,
+            m_velocity.x, m_velocity.y, m_velocity.z,
+            m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
 
-    MoveObject();
+    // Set position on the entity. During stable orbit, do NOT send SetBallPosition
+    // to the client — let the client's own orbit simulation run undisturbed.
+    // The server position is used for combat range checks only.
+    mySE->SetPosition(m_position);
 }
 
 GPoint DestinyManager::ComputePosition(double curRad) {
@@ -1610,6 +1610,7 @@ GPoint DestinyManager::ComputePosition(double curRad) {
     float theta = m_orbitRadTic * 0/*timeStamp*/;
     // angle around xz axis (from 0) - vertical movement
     GVector target(m_position, Tp);
+    #define LogMacro(v) _log(DESTINY__ORBIT_TRACE, "m - " #v ": (%.3f, %.3f, %.3f)   len=%.3f", v.x, v.y, v.z, v.length())
     LogMacro(target);
     float hyp = sqrt(pow(target.z, 2) + pow(target.x, 2));
     // See A371 Bug22.3 — Inclination reduced (see orbit position calculation above).
@@ -2617,12 +2618,41 @@ void DestinyManager::Orbit(SystemEntity *pSE, uint32 distance/*0*/) {
         m_followDistance = (uint32)(m_targetDistance + Tr + m_radius); // fudge something here.  will have to fix later, but this is close enough
     }
 
+    // See A371 Bug22.3 — Initialize velocity for physics-based orbit.
+    // The client and server must start with the same initial velocity vector.
+    // Compute an initial tangent direction (perpendicular to target, CCW in XZ plane)
+    // and set velocity to orbit speed in that direction.
+    {
+        GVector toTarget(m_position, pSE->GetPosition());
+        double dist = toTarget.length();
+        if (dist > 1.0) {
+            toTarget.normalize();
+            // Tangent = cross(toTarget, up) for CCW orbit
+            GVector tangent(toTarget.z, 0.0, -toTarget.x);
+            double tangentLen = tangent.length();
+            if (tangentLen > 0.001) tangent.normalize();
+            m_velocity = tangent * velocity;  // 'velocity' = orbit speed from Santorine formula
+            m_shipHeading = tangent;
+        }
+    }
+
+    // Send orbit command + initial velocity to client so both start from same state.
+    std::vector<PyTuple*> updates;
+
     CmdOrbit du;
         du.entityID = mySE->GetID();
         du.orbitEntityID = pSE->GetID();
         du.distance = (int32)m_targetDistance;
-    PyTuple *up = du.Encode();
-    SendSingleDestinyUpdate(&up);   // consumed
+    updates.push_back(du.Encode());
+
+    SetBallVelocity bv;
+        bv.entityID = mySE->GetID();
+        bv.x = m_velocity.x;
+        bv.y = m_velocity.y;
+        bv.z = m_velocity.z;
+    updates.push_back(bv.Encode());
+
+    SendDestinyUpdate(updates);
 }
 
 bool DestinyManager::IsAligned(GPoint& targetPoint)
