@@ -921,6 +921,11 @@ void DestinyManager::MoveObject() {
     // 5 ticks (5 seconds) to correct accumulated drift during active movement.
     // See A371 Bug22 — Extended to NPCs: NPC position sync every 3 ticks keeps
     // client dead-reckoning from diverging during orbit/follow.
+    // See A371 Bug22.3 — Per-tick forceSync REMOVED for orbit mode.
+    // The client receives CmdOrbit and computes smooth orbit interpolation locally.
+    // Per-tick SetBallPosition fights the client's interpolation, causing visible
+    // snap-back every tick (ship accelerates then snaps to server position, repeat).
+    // Periodic sync (5-tick player, 3-tick NPC) is sufficient for drift correction.
     bool forceSync = false;
     if (!sConfig.debug.PositionHack) {
         uint8 syncInterval = mySE->HasPilot() ? 5 : 3;
@@ -1375,8 +1380,8 @@ void DestinyManager::Orbit() {
     double centers(m_position.distance(Tp));
     double edges(centers - m_radius - Tr);
     if (is_log_enabled(DESTINY__ORBIT_TRACE))
-        _log(DESTINY__ORBIT_TRACE, "1 - %s(%u): time:%u, centers:%.2f, edges:%.2f, target:%u, follow:%u", \
-            mySE->GetName(), mySE->GetID(), timeStamp, centers, edges, m_targetDistance, m_followDistance);
+        _log(DESTINY__ORBIT_TRACE, "1 - %s(%u): time:%u, centers:%.2f, edges:%.2f, target:%.2f, follow:%u, Tr:%.0f", \
+            mySE->GetName(), mySE->GetID(), timeStamp, centers, edges, m_targetDistance, m_followDistance, Tr);
 
     // distances checks for orbit calculations
     GPoint mPos(NULL_ORIGIN);
@@ -1459,14 +1464,24 @@ void DestinyManager::Orbit() {
     GPoint preOrbitPos(m_position);
 
     // new orbit code
-    float radius = static_cast<float>(m_followDistance) + mPosAdj;// fudge a bit as using targetDistance is a hair too close
+    // See A371 Bug22.3 — Orbit radius must include target radius.
+    // m_followDistance is the edge-to-edge orbit distance (from the orbit formula).
+    // The orbit position is computed relative to the target CENTER (Tp), so we must
+    // add Tr (target radius) to get the correct center-to-center distance.
+    // Without this, ships orbit INSIDE large objects (stations with Tr=29000m+).
+    float radius = static_cast<float>(m_followDistance) + mPosAdj + Tr;
     // angle around y axis (from +x) - horizontal movement  - ccw from +x using ships orbit in rad/tic
     float theta = EvE::Trig::Pi2 - EvE::Trig::Deg2Rad(360) - (m_orbitRadTic * timeStamp);
     // angle around xz axis (from 0) - vertical movement
     //GVector target(m_position, Tp);
     //LogMacro(target);
     //float hyp = sqrt(pow(target.z, 2) + pow(target.x, 2));
-    float inclination = 45; //atan(hyp / target.y);
+    // See A371 Bug22.3 — Inclination reduced from 45 to 5 degrees.
+    // 45-degree inclination creates enormous Y oscillation proportional to orbit radius:
+    // for a 30km station orbit, mPos.y swings ±24km, pushing total distance to ~38km
+    // from center vs intended ~30km. This triggers constant TooFar/approach oscillation.
+    // 5 degrees gives <0.5% distance variation — stable, flat orbits like retail EVE.
+    float inclination = 5; //atan(hyp / target.y);
     // fractional value of orbit period (0 < x < 1)
     float period = fmod(timeStamp, m_orbitTime) / m_orbitTime;
     // calculate a pendulum value here to adjust elevation (+/-y) where +x is 1, 0x is 0, -x is -1
@@ -1597,7 +1612,8 @@ GPoint DestinyManager::ComputePosition(double curRad) {
     GVector target(m_position, Tp);
     LogMacro(target);
     float hyp = sqrt(pow(target.z, 2) + pow(target.x, 2));
-    float inclination = 45; //atan(hyp / target.y);
+    // See A371 Bug22.3 — Inclination reduced (see orbit position calculation above).
+    float inclination = 5; //atan(hyp / target.y);
     // fractional value of orbit period (0 < x < 1)
     float period = fmod(0/*timeStamp*/, m_orbitTime) /m_orbitTime;
     // calculate a pendulum value here to adjust elevation (+/-y) where +x is 1, 0x is 0, -x is -1
@@ -2542,7 +2558,10 @@ void DestinyManager::Orbit(SystemEntity *pSE, uint32 distance/*0*/) {
     double six = (one + (8 * Rc2) + (12 * five));
     m_followDistance =  std::sqrt(four + (24 *  std::pow(Rc, 4) / six) + 12 * Rc2) / 6;
 
-    double velocity = m_maxShipSpeed * ((distance / m_followDistance) + 0.065); // dunno where i got this from but seems to work very well.
+    // See A371 Bug22.3 — Cast to double to avoid integer division truncation.
+    // Both distance and m_followDistance are uint32. When distance < m_followDistance,
+    // integer division gives 0, producing orbit speed of only ~6.5% of max.
+    double velocity = m_maxShipSpeed * ((static_cast<double>(distance) / static_cast<double>(m_followDistance)) + 0.065);
     // See A371 Bug22.1 — Guard against m_maxShipSpeed == 0 causing NaN (0/0).
     // NPC's SetMaxVelocity() caps speed against AttrMaxVelocity which can be 0 for some NPCs,
     // making m_maxShipSpeed = 0. This would cause m_maxOrbitSpeedFraction = NaN.

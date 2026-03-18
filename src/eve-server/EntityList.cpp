@@ -2610,6 +2610,15 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
 
         DestinyManager* pDM = pAIShip->DestinyMgr();
         const GPoint& pos = pAIShip->GetPosition();
+        // See A371 Bug22.3 — Diagnostic: log position source comparison.
+        // Check if DestinyManager::m_position matches SystemEntity::GetPosition()
+        if (pDM != nullptr) {
+            const GPoint& dmPos = pDM->GetPosition();
+            sLog.Cyan("get_ship_status", "%s(%u): SE.pos=(%.0f,%.0f,%.0f) DM.pos=(%.0f,%.0f,%.0f) match=%s",
+                pAIShip->GetName(), pAIShip->GetID(),
+                pos.x, pos.y, pos.z, dmPos.x, dmPos.y, dmPos.z,
+                (fabs(pos.x - dmPos.x) < 1.0 && fabs(pos.y - dmPos.y) < 1.0 && fabs(pos.z - dmPos.z) < 1.0) ? "YES" : "NO");
+        }
         const char* stateName = "unknown";
         uint8 mode = pDM ? pDM->GetState() : 255;
         switch (mode) {
@@ -2684,8 +2693,18 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             else if (se->IsGateSE())   category = "gate";
             else continue;  // skip celestials, belts, etc.
 
-            double distSq = pAIShip->DistanceTo2(se);
-            double dist = sqrt(distSq);
+            // See A371 Bug22.3 — DistanceTo2 returns actual distance (not squared).
+            // The "2" means "between 2 entities," NOT "squared." No sqrt needed.
+            double dist = pAIShip->DistanceTo2(se);
+
+            // See A371 Bug22.3 — Diagnostic: log per-entity position during get_overview
+            // to trace server-side position discrepancy between get_ship_status and get_overview.
+            if (se->IsShipSE() || se->IsAIShipSE()) {
+                const GPoint& myPos = pAIShip->GetPosition();
+                const GPoint& sePos = se->GetPosition();
+                sLog.Cyan("get_overview", "  entity %s(%u): myPos=(%.0f,%.0f,%.0f) sePos=(%.0f,%.0f,%.0f) dist=%.0f",
+                    se->GetName(), se->GetID(), myPos.x, myPos.y, myPos.z, sePos.x, sePos.y, sePos.z, dist);
+            }
 
             // See A371 Bug19 — Battle telemetry: include HP percentages for combat entities.
             // Format: id|name|typeID|category|distance|shieldPct|armorPct|hullPct
