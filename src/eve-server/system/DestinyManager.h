@@ -323,6 +323,16 @@ private:
     // its own warp-exit transition).
     uint8 m_postWarpCorrectionTicks;
 
+    // See A379 §13 — Delayed server-initiated AP jump.
+    // WarpStop sets these instead of calling StargateJump immediately.
+    // ProcessState fires the jump AFTER post-warp correction ticks finish,
+    // giving the client time (~2.5s) to render the warp exit before the
+    // session change occurs. Without this delay, the client sees a system
+    // transition while still in the warp tunnel ("jump before landing").
+    bool m_apPendingJump;
+    uint32 m_apPendingGateID;
+    uint32 m_apPendingDestGateID;
+
     // See A371 Bug19 — Periodic position sync for player ships.
     // Server and client compute movement physics independently. Without
     // periodic position broadcasts, floating-point and timing differences
