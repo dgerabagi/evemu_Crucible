@@ -1459,13 +1459,18 @@ void Client::StargateJump(uint32 fromGate, uint32 toGate) {
     // Make Jump-In point a random spot on ~10km radius sphere about the stargate radius
     m_movePoint.MakeRandomPointOnSphereLayer(toData.radius + 6500, toData.radius + 9500);
     m_moveSystemID = toData.systemID;
-/*
-    char ci[25];
-    snprintf(ci, sizeof(ci), "Jumping:%u", toGate);
-    m_ship->SetCustomInfo(ci);
-*/
-    //delay the move 4sec so they can see the JumpOut animation
-    SetStateTimer(Player::State::Jump, Player::Timer::Jumping);
+
+    // See A379 §12 — Execute jump immediately instead of using a 4s timer.
+    // The client's PerformSessionChange('autopilot', CmdStargateJump, ...) expects
+    // the session to change before the RPC returns. With the old 4s timer, the
+    // session change was sent as a pushed notification 4s after CmdStargateJump
+    // returned, breaking the client's autopilot state — PerformSessionChange saw
+    // no session change and the client disabled AP. By executing immediately, the
+    // session change is queued before the CmdStargateJump response, so the client
+    // sees the session changed when PerformSessionChange completes.
+    // The JumpOut animation (sent above) plays on the client independently.
+    m_clientState = Player::State::Jump;
+    ExecuteJump();
 }
 
 void Client::CynoJump(InventoryItemRef beacon) {
