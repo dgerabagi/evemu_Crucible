@@ -175,34 +175,38 @@ void DestinyManager::ProcessState() {
             m_maxSpeed, m_maxShipSpeed, distFromBubble);
     }
 
+    // See A379 §14 — Post-warp correction ticks and delayed AP jump.
+    // These run BEFORE the mode switch because:
+    // 1) Position corrections must broadcast regardless of mode (client may have
+    //    changed us to FOLLOW via CmdFollowBall during the correction period)
+    // 2) The pending AP jump must fire regardless of mode — the old code only
+    //    checked in STOP mode, but the client's AP timer sends CmdFollowBall ~1s
+    //    after WarpStop, changing mode to FOLLOW and preventing the pending jump
+    //    from ever firing. This caused a race where Follow()'s auto-jump fired
+    //    first, then the stale pending jump fired AGAIN in the new system (double
+    //    jump), corrupting client AP state.
+    if (m_postWarpCorrectionTicks > 0) {
+        --m_postWarpCorrectionTicks;
+        SetPosition(m_position, true);
+    }
+    if (m_apPendingJump) {
+        if (m_postWarpCorrectionTicks == 0) {
+            m_apPendingJump = false;
+            uint32 gateID = m_apPendingGateID;
+            uint32 destGateID = m_apPendingDestGateID;
+            m_apPendingGateID = 0;
+            m_apPendingDestGateID = 0;
+            if (mySE->HasPilot() and mySE->GetPilot()->IsAutoPilot()) {
+                _log(AUTOPILOT__MESSAGE, "ProcessState: Firing delayed AP jump gate %u → %u (post-warp corrections done)",
+                        gateID, destGateID);
+                mySE->GetPilot()->StargateJump(gateID, destGateID);
+            }
+        }
+        return;  // While pending jump is active, skip normal mode processing
+    }
+
     switch(m_ballMode) {
         case Ball::Mode::STOP: {
-            // See A371 Bug18 — Post-warp position correction.
-            // After WarpStop, the ship is STOP mode with IsMoving()==false, so MoveObject()
-            // is never called. We broadcast SetBallPosition here to force-sync the client.
-            if (m_postWarpCorrectionTicks > 0) {
-                --m_postWarpCorrectionTicks;
-                SetPosition(m_position, true);
-            }
-            // See A379 §13 — Delayed server-initiated AP jump.
-            // Fire the pending jump ONLY after all post-warp correction ticks have
-            // finished. This gives the client ~2.5s to process CmdStop + SetBallPosition
-            // and render the warp exit animation before the session change occurs.
-            // Without this delay, the client sees a system transition while still in the
-            // warp tunnel ("i didnt even land at the gate before i jumped").
-            if (m_apPendingJump and m_postWarpCorrectionTicks == 0) {
-                m_apPendingJump = false;
-                uint32 gateID = m_apPendingGateID;
-                uint32 destGateID = m_apPendingDestGateID;
-                m_apPendingGateID = 0;
-                m_apPendingDestGateID = 0;
-                if (mySE->HasPilot() and mySE->GetPilot()->IsAutoPilot()) {
-                    _log(AUTOPILOT__MESSAGE, "ProcessState: Firing delayed AP jump gate %u → %u (post-warp corrections done)",
-                            gateID, destGateID);
-                    mySE->GetPilot()->StargateJump(gateID, destGateID);
-                    return;
-                }
-            }
             if (IsMoving()) {
                 MoveObject();
                 return;
@@ -639,9 +643,14 @@ void DestinyManager::Halt() {
     // values from persisting across state transitions (e.g., orbit → warp → stop).
     ClearOrbit();
 
-    // See A379 §13 — Do NOT clear pending AP jump here. Halt() is called by
-    // WarpStop before the pending jump is set up. The pending jump state is
-    // only cleared after firing or when AP is explicitly disabled.
+    // See A379 §14 — Clear pending AP jump on Halt(). When StargateJump fires
+    // (from any source), MoveToLocation calls Halt() in the new system. The pending
+    // jump state from the OLD system must not survive into the new system, otherwise
+    // ProcessState fires a second StargateJump with stale gate IDs (double jump),
+    // corrupting client AP state.
+    m_apPendingJump = false;
+    m_apPendingGateID = 0;
+    m_apPendingDestGateID = 0;
 
     if (is_log_enabled(DESTINY__MOVE_TRACE))
         _log(DESTINY__MOVE_TRACE, "Destiny::Halt() - %s(%u): m_shipHeading: %.3f,%.3f,%.3f", \
@@ -1268,25 +1277,14 @@ void DestinyManager::Follow() {
         surfaceDist = 0.0;
     m_targetDistance = surfaceDist;
 
-    // See A379 §12 — Auto-jump when approaching a gate with AP active.
-    // When the ship gets within 2500m surface distance of a gate it's following
-    // and autopilot is on, initiate the jump. This handles the case where
-    // WarpStop landed the ship > 2500m and set up Follow() for approach.
-    if (surfaceDist <= 2500.0
-            and mySE->HasPilot()
-            and mySE->GetPilot()->IsAutoPilot()
-            and m_targetEntity.second->IsGateSE()) {
-        uint32 apGateID = mySE->GetPilot()->GetAPGateID();
-        uint32 apDestGateID = mySE->GetPilot()->GetAPDestGateID();
-        if (apGateID > 0 and apDestGateID > 0
-                and apGateID == m_targetEntity.first) {
-            _log(AUTOPILOT__MESSAGE, "Follow: AP approach within 2500m (%.0fm), initiating StargateJump gate %u → %u",
-                    surfaceDist, apGateID, apDestGateID);
-            Halt();
-            mySE->GetPilot()->StargateJump(apGateID, apDestGateID);
-            return;
-        }
-    }
+    // See A379 §14 — Follow() auto-jump REMOVED.
+    // The delayed pending jump (fired from ProcessState after correction ticks) is the
+    // sole server-side jump mechanism. The Follow() auto-jump raced with it: client's
+    // AP timer sent CmdFollowBall ~1s after WarpStop, Follow() auto-jumped at ~2s,
+    // then the stale pending jump fired AGAIN in the new system (double jump),
+    // corrupting client AP state and killing autopilot.
+    // If the ship lands > 2500m and approaches via Follow, the CLIENT will detect
+    // distance < 2500m and send CmdStargateJump when its AP timer fires.
 
     // Distance checks — within follow range?
     if (surfaceDist <= m_followDistance) {
@@ -2161,7 +2159,8 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
                     m_apPendingDestGateID = apDestGateID;
                     apJumped = true;  // suppress CmdFollowBall in destiny batch
                 } else {
-                    // Outside jump range — set up approach, Follow() will auto-jump at 2500m
+                    // Outside jump range — set up approach. Client AP timer will detect
+                    // distance < 2500m and send CmdStargateJump (see A379 §14).
                     _log(AUTOPILOT__MESSAGE, "WarpStop: Outside 2500m (%.0fm), setting up approach to gate", distToGate);
                     if (m_orbiting) ClearOrbit();
                     m_ballMode = Destiny::Ball::Mode::FOLLOW;
@@ -2237,8 +2236,8 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
                 mySE->SysBubble()->GetID(), distFromCenter, (uint32)m_ballMode);
     }
 
-    // See A379 §12 — Server initiates jump directly when within range.
-    // For approach cases, Follow() will auto-jump when surface dist <= 2500m.
+    // See A379 §14 — Server initiates jump via delayed pending mechanism.
+    // For approach cases (>2500m), the client AP timer handles the jump.
 }
 
 //called whenever an entity is going away and can no longer be used as a target
