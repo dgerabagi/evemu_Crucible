@@ -1242,6 +1242,26 @@ void DestinyManager::Follow() {
         surfaceDist = 0.0;
     m_targetDistance = surfaceDist;
 
+    // See A379 §12 — Auto-jump when approaching a gate with AP active.
+    // When the ship gets within 2500m surface distance of a gate it's following
+    // and autopilot is on, initiate the jump. This handles the case where
+    // WarpStop landed the ship > 2500m and set up Follow() for approach.
+    if (surfaceDist <= 2500.0
+            and mySE->HasPilot()
+            and mySE->GetPilot()->IsAutoPilot()
+            and m_targetEntity.second->IsGateSE()) {
+        uint32 apGateID = mySE->GetPilot()->GetAPGateID();
+        uint32 apDestGateID = mySE->GetPilot()->GetAPDestGateID();
+        if (apGateID > 0 and apDestGateID > 0
+                and apGateID == m_targetEntity.first) {
+            _log(AUTOPILOT__MESSAGE, "Follow: AP approach within 2500m (%.0fm), initiating StargateJump gate %u → %u",
+                    surfaceDist, apGateID, apDestGateID);
+            Halt();
+            mySE->GetPilot()->StargateJump(apGateID, apDestGateID);
+            return;
+        }
+    }
+
     // Distance checks — within follow range?
     if (surfaceDist <= m_followDistance) {
         if (mySE->HasPilot() and mySE->GetPilot()->IsAutoPilot()) {
@@ -2064,42 +2084,57 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
     // from the last WarpUpdate tick's integer decelTime).
     SetPosition(finalPos);
 
-    // See A379 §9 — Determine AP state BEFORE sending destiny updates, so we can
-    // batch CmdFollowBall with CmdStop+SetBallPosition in one update. This
-    // eliminates the visual "tail whip" (180° heading snap) that occurs when
-    // CmdStop and CmdFollowBall arrive in separate batches — the client briefly
-    // renders the ship stopped facing the warp direction, then snaps to the
-    // approach heading when CmdFollowBall arrives.
+    // See A379 §12 — Server-initiated jump after warp landing.
     //
-    // CRITICAL: Do NOT server-auto-jump here. The client's autopilot service
-    // expects to initiate jumps itself via PerformSessionChange('autopilot',
-    // CmdStargateJump(...)). If the server fires StargateJump, the client receives
-    // a "surprise" session change that isn't wrapped in PerformSessionChange,
-    // which breaks the client's AP state management and disables autopilot.
-    // Instead, always send CmdFollowBall to approach the gate. The client's
-    // AP timer will detect maxStargateJumpingDistance and fire CmdStargateJump.
-    bool apFollow = false;
-    SystemEntity* gateSE = nullptr;
+    // Root cause analysis (8 attempts): The client's autopilot Update() timer uses
+    // bp.GetSurfaceDist() to check if the ship is within const.maxStargateJumpingDistance
+    // (2500m) of the gate. After warp, the client's ball position is STALE — the
+    // SetBallPosition we send hasn't been processed by the client's destiny simulation
+    // by the time the AP timer fires (it fires every 2s). The client sees a pre-warp
+    // or mid-warp distance > 2500m, so it falls into the approach path (CmdFollowBall)
+    // instead of the jump path (CmdStargateJump). Once in FOLLOW mode, subsequent
+    // AP Update() calls see ship.mode == DSTBALL_FOLLOW && ship.followId == gateID
+    // and return early ("already approaching"), never rechecking distance for jump.
+    //
+    // Fix: The server knows the accurate distance. When AP is active and the ship
+    // lands within 2500m of the target gate, call StargateJump() directly.
+    // When outside 2500m, set up Follow() to approach, and the Follow() handler
+    // will auto-jump when surface distance drops below 2500m.
+    //
+    // Client compatibility: The client's OnSessionChanged handler for autoPilot
+    // just does KillTimer() + ignoreTimerCycles=3 + StartTimer() + UpdateRoute().
+    // It does NOT check who initiated the session change. AP stays enabled.
+    bool apJumped = false;
 
     if (mySE->HasPilot() and mySE->GetPilot()->IsAutoPilot()) {
         uint32 apGateID = mySE->GetPilot()->GetAPGateID();
-        if (apGateID > 0) {
-            gateSE = mySE->SystemMgr()->GetSE(apGateID);
+        uint32 apDestGateID = mySE->GetPilot()->GetAPDestGateID();
+        if (apGateID > 0 and apDestGateID > 0) {
+            SystemEntity* gateSE = mySE->SystemMgr()->GetSE(apGateID);
             if (gateSE != nullptr and gateSE->IsGateSE()) {
                 double distToGate = m_position.distance(gateSE->GetPosition()) - gateSE->GetRadius();
-                _log(AUTOPILOT__MESSAGE, "WarpStop: AP active, gate %u is %.0fm away", apGateID, distToGate);
-                // Set up Follow state for approach — client handles the actual jump
-                if (m_orbiting) ClearOrbit();
-                m_ballMode = Destiny::Ball::Mode::FOLLOW;
-                m_targetPoint = gateSE->GetPosition();
-                m_targetEntity.first = gateSE->GetID();
-                m_targetEntity.second = gateSE;
-                m_followDistance = 0;
-                m_ticAlign = true;
-                BeginMovement();
-                if (m_userSpeedFraction < 0.01f || m_activeSpeedFraction < 0.01f)
-                    SetSpeedFraction(1.0f, true);
-                apFollow = true;
+                _log(AUTOPILOT__MESSAGE, "WarpStop: AP active, gate %u dest %u, surface dist %.0fm",
+                        apGateID, apDestGateID, distToGate);
+
+                if (distToGate <= 2500.0) {
+                    // Within jump range — jump immediately
+                    _log(AUTOPILOT__MESSAGE, "WarpStop: Within 2500m, initiating server-side StargateJump");
+                    mySE->GetPilot()->StargateJump(apGateID, apDestGateID);
+                    apJumped = true;
+                } else {
+                    // Outside jump range — set up approach, Follow() will auto-jump at 2500m
+                    _log(AUTOPILOT__MESSAGE, "WarpStop: Outside 2500m (%.0fm), setting up approach to gate", distToGate);
+                    if (m_orbiting) ClearOrbit();
+                    m_ballMode = Destiny::Ball::Mode::FOLLOW;
+                    m_targetPoint = gateSE->GetPosition();
+                    m_targetEntity.first = gateSE->GetID();
+                    m_targetEntity.second = gateSE;
+                    m_followDistance = 0;
+                    m_ticAlign = true;
+                    BeginMovement();
+                    if (m_userSpeedFraction < 0.01f || m_activeSpeedFraction < 0.01f)
+                        SetSpeedFraction(1.0f, true);
+                }
             } else {
                 _log(AUTOPILOT__MESSAGE, "WarpStop: AP gate %u not found in system, clearing", apGateID);
                 mySE->GetPilot()->ClearAPTargetGate();
@@ -2114,8 +2149,11 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
     // effects.Warping(stop) causes double-cleanup that crashes the client (stack trace at WarpLoop
     // line 324 confirmed). Also include SetBallPosition in the same batch so the client gets the
     // authoritative position correction alongside CmdStop.
-    // See A379 — For AP approach warps, also include CmdFollowBall in this batch
-    // to eliminate the tail whip visual artifact.
+    //
+    // See A379 §12 — CmdFollowBall is NOT batched here. If the ship jumped (apJumped),
+    // we just send CmdStop+SetBallPosition. If approaching (outside jump range), the
+    // Follow() state was already set up above and CmdFollowBall is sent separately below
+    // so the ship transitions cleanly from WARP→STOP→FOLLOW without visual artifacts.
     if (mySE->SysBubble() != nullptr) {
         std::vector<PyTuple*> updates;
 
@@ -2130,13 +2168,13 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
             bp.z = m_position.z;
         updates.push_back(bp.Encode());
 
-        // See A379 — Batch CmdFollowBall with CmdStop for AP gate approach.
-        // The client processes all updates in one batch atomically, so the ship
-        // transitions directly from WARP→FOLLOW without a visible STOP frame.
-        if (apFollow and gateSE != nullptr) {
+        // See A379 §12 — If we're approaching (not jumping), send CmdFollowBall in same batch.
+        // The server Follow() state is already set up, we need the client to match.
+        if (!apJumped and m_ballMode == Destiny::Ball::Mode::FOLLOW
+                and m_targetEntity.second != nullptr) {
             CmdFollowBall fb;
                 fb.entityID = mySE->GetID();
-                fb.targetID = gateSE->GetID();
+                fb.targetID = m_targetEntity.first;
                 fb.range = 0;
             updates.push_back(fb.Encode());
         }
@@ -2161,11 +2199,8 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
                 mySE->SysBubble()->GetID(), distFromCenter, (uint32)m_ballMode);
     }
 
-    // See A379 §9 — Do NOT auto-jump here. The client's autopilot service must
-    // initiate jumps via PerformSessionChange('autopilot', CmdStargateJump(...)).
-    // Server-initiated jumps create "surprise" session changes that break client AP.
-    // The client's AP timer will detect within maxStargateJumpingDistance and fire
-    // CmdStargateJump on its next 2-second tick.
+    // See A379 §12 — Server initiates jump directly when within range.
+    // For approach cases, Follow() will auto-jump when surface dist <= 2500m.
 }
 
 //called whenever an entity is going away and can no longer be used as a target
