@@ -739,7 +739,9 @@ PyResult BeyonceBound::CmdStargateJump(PyCallArgs &call, PyInt* fromStargateID, 
 (258704, `You cannot leave {system} yet because of instability in the space-time continuum. Please try again in a moment.`)
 */
 
-    _log(AUTOPILOT__MESSAGE, "%s called Jump. AP: %s", call.client->GetName(), (call.client->IsAutoPilot() ? "true" : "false"));
+    _log(AUTOPILOT__MESSAGE, "%s called Jump from gate %u to gate %u. AP: %s",
+            call.client->GetName(), fromStargateID->value(), toStargateID->value(),
+            (call.client->IsAutoPilot() ? "true" : "false"));
     if (call.client->IsSessionChange()) {
         call.client->SendNotifyMsg("Session Change currently active.");
         return PyStatic.NewNone();
