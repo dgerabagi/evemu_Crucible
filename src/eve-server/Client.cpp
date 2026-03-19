@@ -704,7 +704,12 @@ void Client::MoveToLocation(uint32 locationID, const GPoint& pt) {
             wasDocked = false;  // dont update station again on this call (redundant check later in this method)
         }
         if (pShipSE != nullptr)
-            if ((IsJump()) and !m_autoPilot)
+            // See A379 — Always Halt() during jumps, even for autopilot.
+            // Halt() resets movement state (FOLLOW/GOTO mode, stale entity refs) without
+            // clearing the AP flag. Without this, the DestinyManager enters the new system
+            // in FOLLOW mode targeting a gate entity from the OLD system, causing undefined
+            // behavior when ProcessState ticks.
+            if (IsJump())
                 pShipSE->DestinyMgr()->Halt();
 
         // remove from current system before resetting system vars

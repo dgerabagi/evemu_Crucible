@@ -641,9 +641,9 @@ PyResult BeyonceBound::CmdWarpToStuffAutopilot(PyCallArgs &call, PyInt* destID) 
         distance += (int32)(call.client->GetShipSE()->GetRadius() * 2);
         call.client->ClearAPTargetGate();
     }
-    // See A379 — Pass autoPilot=true so WarpTo sends CmdFollowBall (AP-safe)
-    // instead of CmdGotoPoint (which triggers client OnBallparkCall → SetOff).
-    pDestiny->WarpTo(pSE->GetPosition(), distance, true, pSE);
+    // See A379 — WarpTo for player warps no longer sends CmdGotoPoint/CmdFollowBall
+    // (which would kill AP and the Jump button). Gate approach is handled in WarpStop.
+    pDestiny->WarpTo(pSE->GetPosition(), distance);
 
     return PyStatic.NewNone();
 }
