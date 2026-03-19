@@ -609,16 +609,26 @@ PyResult BeyonceBound::CmdWarpToStuffAutopilot(PyCallArgs &call, PyInt* destID) 
 
     call.client->SetInvul(false);
     call.client->SetUndock(false);
-    // AP shit here.....
+    // See A379 — Autopilot now actually warps to destination instead of using Follow().
+    // The client's autopilot.py Update() loop manages the full route: it calls
+    // CmdWarpToStuffAutopilot to warp, CmdFollowBall to approach, and CmdStargateJump
+    // to jump. The server just needs to warp correctly and preserve AP state.
     call.client->SetAutoPilot(true);
     call.client->UpdateSessionInt("solarsystemid", pSystem->GetID());
-    //call.client->UpdateSession();
-    //call.client->SendSessionChange();
 
-    uint16 distance = sConfig.world.apWarptoDistance;    //10km default
-    //Adding in ship and target object radius'
-    //distance += call.client->GetShipSE()->GetRadius() + pSE->GetRadius();
-    pDestiny->WarpTo(pSE->GetPosition(), distance, true, pSE);
+    // Calculate warp stop distance. For gates, warp close enough for the client's
+    // approach+jump logic to take over. For other objects, use config default.
+    int32 distance = sConfig.world.apWarptoDistance;    // 15km default
+    if (pSE->IsGateSE()) {
+        // Warp to gate radius + ship radius + 1000m buffer — puts us just outside
+        // the gate model so the client can approach and auto-jump.
+        distance = (int32)(pSE->GetRadius() + call.client->GetShipSE()->GetRadius() + 1000);
+    } else {
+        // For non-gate targets, add ship diameter for safety
+        distance += (int32)(call.client->GetShipSE()->GetRadius() * 2);
+    }
+    // Actually warp (autoPilot=false so WarpTo uses GotoPoint, not Follow)
+    pDestiny->WarpTo(pSE->GetPosition(), distance, false, pSE);
 
     return PyStatic.NewNone();
 }
@@ -645,7 +655,10 @@ PyResult BeyonceBound::CmdStop(PyCallArgs &call) {
     }
 
     call.client->SetUndock(false);
-    call.client->SetAutoPilot(false);
+    // See A379 — Do NOT clear autopilot on CmdStop. The client's autopilot service
+    // manages AP state — it calls SetOn/SetOff explicitly. Clearing AP here would
+    // break the autopilot chain because the client sends CmdStop between warp legs.
+    // If the player manually toggles AP off, the client sends that separately.
 
     pDestiny->Stop();
 

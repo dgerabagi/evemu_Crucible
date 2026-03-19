@@ -549,11 +549,10 @@ void DestinyManager::Stop() {
         return;
     }
 
-    // AP not implemented yet in this version  -allan 4Mar15
-    // Clear autopilot
-    if (mySE->HasPilot()) {
-        mySE->GetPilot()->SetAutoPilot(false);
-    }
+    // See A379 — Do NOT clear autopilot in Stop(). The client manages AP state.
+    // Stop() gets called during normal movement transitions (warp end, approach end,
+    // system changes) and clearing AP here breaks the autopilot chain. The client's
+    // autopilot.py SetOff() handles disabling AP when appropriate.
 
     if (m_userSpeedFraction == 0.0f) {
         m_stop = true;
@@ -2011,7 +2010,9 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
             m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
 
     if (mySE->IsShipSE()) {
-        _log(AUTOPILOT__MESSAGE, "Destiny::WarpStop(): %s(%u) - Warp complete.", mySE->GetName(), mySE->GetID());
+        _log(AUTOPILOT__MESSAGE, "Destiny::WarpStop(): %s(%u) - Warp complete. AP: %s",
+                mySE->GetName(), mySE->GetID(),
+                (mySE->GetPilot()->IsAutoPilot() ? "true" : "false"));
         mySE->GetPilot()->SetLoginWarpComplete();
     }
 
@@ -2301,12 +2302,10 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance/*0*/, bool autoP
      */
     SafeDelete(m_warpState);
 
-    // check for autopilot.  it has 'special' checks in client for auto-disable by destiny update
-    if (autoPilot) {
-        Follow(pSE, distance);
-    } else {
-        GotoPoint(where);
-    }
+    // See A379 — Always use GotoPoint for warp. The old autopilot code called Follow()
+    // here which made the ship slowly approach at sublight instead of warping. The client's
+    // autopilot service handles warp/approach/jump sequencing — server just needs to warp.
+    GotoPoint(where);
 
     m_targetEntity.first = 0;
     m_targetEntity.second = nullptr;
