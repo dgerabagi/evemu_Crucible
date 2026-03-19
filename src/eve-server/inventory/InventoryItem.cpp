@@ -27,6 +27,7 @@
 #include "eve-server.h"
 
 #include "../../eve-common/EVE_Mail.h"
+#include "EVEServerConfig.h"
 
 #include "Client.h"
 #include "ConsoleCommands.h"
@@ -1266,6 +1267,9 @@ bool InventoryItem::Populate(Rsp_CommonGetInfo_Entry& result )
         //localization.GetByLabel('UI/Fitting/FittingWindow/WarpSpeed', distText=util.FmtDist(max(1.0, bws) * wsm * 3 * const.AU, 2))
         if ((*itr).first == AttrWarpSpeedMultiplier) {
             result.attributes[AttrWarpSpeedMultiplier] = new PyFloat((*itr).second.get_float() /3);
+        } else if ((*itr).first >= AttrCharisma && (*itr).first <= AttrWillpower && sConfig.rates.skillRate != 1.0f) {
+            // See A369.1 — multiply learning attributes by skillRate so the client calculates accelerated SP/min
+            result.attributes[(*itr).first] = new PyFloat((*itr).second.get_float() * sConfig.rates.skillRate);
         } else {
             result.attributes[(*itr).first] = (*itr).second.GetPyObject();
         }

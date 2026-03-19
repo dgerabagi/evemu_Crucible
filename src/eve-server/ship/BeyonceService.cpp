@@ -609,23 +609,37 @@ PyResult BeyonceBound::CmdWarpToStuffAutopilot(PyCallArgs &call, PyInt* destID) 
 
     call.client->SetInvul(false);
     call.client->SetUndock(false);
-    // See A379 — Autopilot now actually warps to destination instead of using Follow().
-    // The client's autopilot.py Update() loop manages the full route: it calls
-    // CmdWarpToStuffAutopilot to warp, CmdFollowBall to approach, and CmdStargateJump
-    // to jump. The server just needs to warp correctly and preserve AP state.
+    // See A379 — Server-side autopilot: warp to destination, then server drives
+    // gate approach + auto-jump (client's AP timer dies after WarpStop CmdStop).
     call.client->SetAutoPilot(true);
     call.client->UpdateSessionInt("solarsystemid", pSystem->GetID());
 
-    // Calculate warp stop distance. For gates, warp close enough for the client's
-    // approach+jump logic to take over. For other objects, use config default.
+    // Calculate warp stop distance. For gates, warp close enough to approach+jump.
     int32 distance = sConfig.world.apWarptoDistance;    // 15km default
     if (pSE->IsGateSE()) {
-        // Warp to gate radius + ship radius + 1000m buffer — puts us just outside
-        // the gate model so the client can approach and auto-jump.
+        // Warp to gate radius + ship radius + 1000m buffer
         distance = (int32)(pSE->GetRadius() + call.client->GetShipSE()->GetRadius() + 1000);
+
+        // See A379 — Look up destination gate for server-side auto-jump after warp
+        DBQueryResult jumpRes;
+        uint32 destGateID = 0;
+        if (sDatabase.RunQuery(jumpRes,
+            "SELECT celestialID FROM mapJumps WHERE stargateID = %u", pSE->GetID()))
+        {
+            DBResultRow jumpRow;
+            if (jumpRes.GetRow(jumpRow))
+                destGateID = jumpRow.GetUInt(0);
+        }
+        if (destGateID > 0) {
+            call.client->SetAPTargetGate(pSE->GetID(), destGateID);
+            _log(AUTOPILOT__MESSAGE, "%s AP warp to gate %u (dest gate %u)", call.client->GetName(), pSE->GetID(), destGateID);
+        } else {
+            _log(AUTOPILOT__MESSAGE, "%s AP warp to gate %u (no dest gate found!)", call.client->GetName(), pSE->GetID());
+        }
     } else {
         // For non-gate targets, add ship diameter for safety
         distance += (int32)(call.client->GetShipSE()->GetRadius() * 2);
+        call.client->ClearAPTargetGate();
     }
     // Actually warp (autoPilot=false so WarpTo uses GotoPoint, not Follow)
     pDestiny->WarpTo(pSE->GetPosition(), distance, false, pSE);

@@ -112,6 +112,8 @@ Client::Client(EVEServiceManager& services, EVETCPConnection** con)
     m_packaged = false;
     m_portrait = false;
     m_autoPilot = false;
+    m_apGateID = 0;
+    m_apDestGateID = 0;
     m_bubbleWait = false;     // allow client processing of subsquent destiny msgs
     m_charCreation = false;
     m_setStateSent = false;
@@ -657,6 +659,8 @@ void Client::SetAutoPilot(bool set/*false*/)
         return;
 
     m_autoPilot = set;
+    if (!set)
+        ClearAPTargetGate();
     _log(AUTOPILOT__MESSAGE, "%s called SetAutoPilot to %s", GetName(), (set ? "true" : "false"));
 }
 
@@ -941,6 +945,7 @@ void Client::DockToStation() {
     pShipSE->Dock();
     // ap cleared on client side when docking.
     m_autoPilot = false;
+    ClearAPTargetGate();
     m_setStateSent = false;
     m_clientState = Player::State::Idle;
     _log(AUTOPILOT__TRACE, "DockToStation()() - m_clientState set to Idle");
@@ -1211,6 +1216,7 @@ void Client::Eject()
 void Client::ResetAfterPopped(GPoint& position)
 {
     m_autoPilot = false;
+    ClearAPTargetGate();
     m_bubbleWait = false;    // allow client processing of subsquent destiny msgs
 
     if (m_pod.get() == nullptr)
@@ -1259,6 +1265,7 @@ void Client::ResetAfterPodded() {
      */
 
     m_autoPilot = false;
+    ClearAPTargetGate();
 
     CreateNewPod();
     SetShip(m_pod);

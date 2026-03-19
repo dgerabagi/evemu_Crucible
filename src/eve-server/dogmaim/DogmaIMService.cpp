@@ -126,12 +126,13 @@ PyResult DogmaIMBound::GetTargeters(PyCallArgs& call) {
 PyResult DogmaIMBound::GetCharacterBaseAttributes(PyCallArgs& call)
 {
     CharacterRef cref = call.client->GetChar();
+    float rate = sConfig.rates.skillRate;
     PyDict* result = new PyDict();
-        result->SetItem(new PyInt(AttrIntelligence), cref->GetAttribute(AttrIntelligence).GetPyObject());
-        result->SetItem(new PyInt(AttrPerception), cref->GetAttribute(AttrPerception).GetPyObject());
-        result->SetItem(new PyInt(AttrCharisma), cref->GetAttribute(AttrCharisma).GetPyObject());
-        result->SetItem(new PyInt(AttrWillpower), cref->GetAttribute(AttrWillpower).GetPyObject());
-        result->SetItem(new PyInt(AttrMemory), cref->GetAttribute(AttrMemory).GetPyObject());
+        result->SetItem(new PyInt(AttrIntelligence), new PyFloat(cref->GetAttribute(AttrIntelligence).get_float() * rate));
+        result->SetItem(new PyInt(AttrPerception), new PyFloat(cref->GetAttribute(AttrPerception).get_float() * rate));
+        result->SetItem(new PyInt(AttrCharisma), new PyFloat(cref->GetAttribute(AttrCharisma).get_float() * rate));
+        result->SetItem(new PyInt(AttrWillpower), new PyFloat(cref->GetAttribute(AttrWillpower).get_float() * rate));
+        result->SetItem(new PyInt(AttrMemory), new PyFloat(cref->GetAttribute(AttrMemory).get_float() * rate));
     return result;
 }
 

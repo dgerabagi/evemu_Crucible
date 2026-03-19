@@ -265,6 +265,12 @@ public:
     bool IsAutoPilot()                                  { return m_autoPilot; }
     void SetAutoPilot(bool set=false);
 
+    // See A379 — Server-side autopilot gate tracking for post-warp continuation
+    void SetAPTargetGate(uint32 gateID, uint32 destGateID) { m_apGateID = gateID; m_apDestGateID = destGateID; }
+    void ClearAPTargetGate()                             { m_apGateID = 0; m_apDestGateID = 0; }
+    uint32 GetAPGateID()                                 { return m_apGateID; }
+    uint32 GetAPDestGateID()                             { return m_apDestGateID; }
+
     void JumpInEffect();
     void JumpOutEffect(uint32 locationID);
 
@@ -374,6 +380,9 @@ protected:
     bool m_portrait;        // used to verify new char pic received
     bool m_autoPilot;       // set true for using autopilot.
     bool m_scanProbe;       // scanning with probes
+
+    uint32 m_apGateID;      // See A379 — source gate ID for server-side AP continuation
+    uint32 m_apDestGateID;  // See A379 — destination gate ID for auto-jump after warp
     bool m_bubbleWait;
     bool m_setStateSent;
     bool m_sessionChangeActive; // used to delay actions requiring destiny updates

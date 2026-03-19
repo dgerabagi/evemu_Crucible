@@ -1226,6 +1226,25 @@ void DestinyManager::Follow() {
     GVector heading(m_position, target_point);
     m_targetDistance = (uint32)(heading.length() - m_radius);
 
+    // See A379 — Server-side autopilot auto-jump: when following a gate during AP,
+    // check if we're within jump range (2500m from gate surface) and auto-fire the jump.
+    if (mySE->HasPilot() and mySE->GetPilot()->IsAutoPilot()
+        and m_targetEntity.second->IsGateSE())
+    {
+        double surfaceDist = heading.length() - m_radius - m_targetEntity.second->GetRadius();
+        if (surfaceDist < 2500.0) {
+            uint32 destGateID = mySE->GetPilot()->GetAPDestGateID();
+            uint32 srcGateID = m_targetEntity.first;
+            if (destGateID > 0) {
+                _log(AUTOPILOT__MESSAGE, "Follow: AP auto-jump! Gate %u -> %u (surface dist %.0fm)",
+                        srcGateID, destGateID, surfaceDist);
+                mySE->GetPilot()->ClearAPTargetGate();
+                mySE->GetPilot()->StargateJump(srcGateID, destGateID);
+                return;
+            }
+        }
+    }
+
     if (m_targetDistance < m_followDistance) {
         if (mySE->HasPilot())
             if (mySE->GetPilot()->IsAutoPilot()) {
@@ -2083,6 +2102,35 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
                 m_position.x, m_position.y, m_position.z,
                 m_velocity.x, m_velocity.y, m_velocity.z,
                 mySE->SysBubble()->GetID(), distFromCenter, (uint32)m_ballMode);
+    }
+
+    // See A379 — Server-side autopilot continuation after warp.
+    // The client's autopilot timer dies after receiving CmdStop from WarpStop.
+    // Server must drive the approach→jump sequence for gate warps.
+    if (mySE->HasPilot() and mySE->GetPilot()->IsAutoPilot()) {
+        uint32 apGateID = mySE->GetPilot()->GetAPGateID();
+        if (apGateID > 0) {
+            SystemEntity* gateSE = mySE->SystemMgr()->GetSE(apGateID);
+            if (gateSE != nullptr and gateSE->IsGateSE()) {
+                double distToGate = m_position.distance(gateSE->GetPosition()) - gateSE->GetRadius();
+                _log(AUTOPILOT__MESSAGE, "WarpStop: AP active, approaching gate %u (%.0fm away)", apGateID, distToGate);
+                if (distToGate < 2500.0) {
+                    // Already within jump range — auto-jump immediately
+                    uint32 destGateID = mySE->GetPilot()->GetAPDestGateID();
+                    if (destGateID > 0) {
+                        _log(AUTOPILOT__MESSAGE, "WarpStop: Within jump range, auto-jumping %u -> %u", apGateID, destGateID);
+                        mySE->GetPilot()->ClearAPTargetGate();
+                        mySE->GetPilot()->StargateJump(apGateID, destGateID);
+                    }
+                } else {
+                    // Approach the gate — Follow() will auto-jump when in range
+                    Follow(gateSE, 0);
+                }
+            } else {
+                _log(AUTOPILOT__MESSAGE, "WarpStop: AP gate %u not found in system, clearing", apGateID);
+                mySE->GetPilot()->ClearAPTargetGate();
+            }
+        }
     }
 }
 
