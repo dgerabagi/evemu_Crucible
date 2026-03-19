@@ -641,8 +641,9 @@ PyResult BeyonceBound::CmdWarpToStuffAutopilot(PyCallArgs &call, PyInt* destID) 
         distance += (int32)(call.client->GetShipSE()->GetRadius() * 2);
         call.client->ClearAPTargetGate();
     }
-    // Actually warp (autoPilot=false so WarpTo uses GotoPoint, not Follow)
-    pDestiny->WarpTo(pSE->GetPosition(), distance, false, pSE);
+    // See A379 — Pass autoPilot=true so WarpTo sends CmdFollowBall (AP-safe)
+    // instead of CmdGotoPoint (which triggers client OnBallparkCall → SetOff).
+    pDestiny->WarpTo(pSE->GetPosition(), distance, true, pSE);
 
     return PyStatic.NewNone();
 }

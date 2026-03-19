@@ -2350,10 +2350,16 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance/*0*/, bool autoP
      */
     SafeDelete(m_warpState);
 
-    // See A379 — Always use GotoPoint for warp. The old autopilot code called Follow()
-    // here which made the ship slowly approach at sublight instead of warping. The client's
-    // autopilot service handles warp/approach/jump sequencing — server just needs to warp.
-    GotoPoint(where);
+    // See A379 — For autopilot warps, use Follow() which sends CmdFollowBall to client.
+    // CmdFollowBall does NOT trigger the client's OnBallparkCall → autopilot.SetOff().
+    // GotoPoint() sends CmdGotoPoint, which DOES trigger SetOff() for non-station
+    // destinations, killing client-side autopilot. This is the original EVE design:
+    // Follow for AP-safe notification, then CmdWarpTo overrides with actual warp.
+    if (autoPilot and pSE != nullptr) {
+        Follow(pSE, distance);
+    } else {
+        GotoPoint(where);
+    }
 
     m_targetEntity.first = 0;
     m_targetEntity.second = nullptr;
