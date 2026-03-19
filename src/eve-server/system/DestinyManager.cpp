@@ -1222,25 +1222,36 @@ void DestinyManager::ClearTurn() {
 
 void DestinyManager::Follow() {
     //  Follow is also used by client as AlignTo.
+    // See A379 §10 — Rewritten to properly track target entity each tick.
+    // Old code had three critical bugs:
+    //   1. m_targetPoint was set PAST the target (target_pos + heading * distance)
+    //      instead of AT the target, causing IsTurn()/Turn() to aim at a phantom point
+    //   2. m_targetHeading was NEVER updated after BeginMovement(), so Turn() computed
+    //      zero delta (stale heading ≈ current heading) and the ship flew in a straight line
+    //   3. m_targetDistance was uint32, causing underflow for very close distances
+    // The client's ball simulation recomputes heading toward the target every tick using
+    // agility-based smooth turn interpolation. The server must match this so positions
+    // don't diverge (causing jitter from SetBallPosition corrections).
     const GPoint& target_point = m_targetEntity.second->GetPosition();
-    GVector heading(m_position, target_point);
-    m_targetDistance = (uint32)(heading.length() - m_radius);
+    GVector toTarget(m_position, target_point);
+    double centerDist = toTarget.length();
+    // Surface distance: subtract both ship and target radii (matches client's GetSurfaceDist)
+    double targetRadius = m_targetEntity.second->GetRadius();
+    double surfaceDist = centerDist - m_radius - targetRadius;
+    if (surfaceDist < 0.0)
+        surfaceDist = 0.0;
+    m_targetDistance = surfaceDist;
 
-    // See A379 §9 — Removed server-side auto-jump from Follow(). The client's
-    // autopilot service must initiate jumps itself via PerformSessionChange to
-    // maintain proper AP state across session changes. Server-initiated jumps
-    // create "surprise" session changes that break client-side autopilot.
-
-    if (m_targetDistance < m_followDistance) {
-        if (mySE->HasPilot())
-            if (mySE->GetPilot()->IsAutoPilot()) {
-                SetSpeedFraction(0.1);
-                _log(AUTOPILOT__TRACE, "DestinyManager::Follow() - Target within FollowDistance.  SpeedFraction = 0.1.");
-                return;
-            }
-    // this will allow following entities to keep their follow state, yet stop movement if within their follow distance.
-    //  by keeping their follow state, once the distance is greater than their follow distance, they will begin movement again.
-        if (m_tractored) {
+    // Distance checks — within follow range?
+    if (surfaceDist <= m_followDistance) {
+        if (mySE->HasPilot() and mySE->GetPilot()->IsAutoPilot()) {
+            // See A379 §10 — For autopilot, slow to 10% but DON'T return early.
+            // Must still update m_targetPoint/m_targetHeading and call MoveObject()
+            // so the ship decelerates properly and position stays synced with client.
+            if (m_userSpeedFraction > 0.1f)
+                SetSpeedFraction(0.1f);
+            _log(AUTOPILOT__TRACE, "DestinyManager::Follow() - Target within FollowDistance. surfaceDist=%.0f SpeedFraction = 0.1.", surfaceDist);
+        } else if (m_tractored) {
             // specific to tractored entities.  sudden halt to mimic tractor stopping
             if (!m_tractorPause) {
                 std::vector<PyTuple*> updates;
@@ -1256,8 +1267,6 @@ void DestinyManager::Follow() {
             return;
         } else {
             if ((m_targetEntity.second->IsDynamicEntity()) and (m_targetEntity.second->DestinyMgr()->IsMoving())) {
-                // this will mimic real movement, where ship will decel instead of a sudden halt
-                //  still need to call MoveObject() here
                 SetSpeedFraction(0.2);
             } else {
                 Stop();
@@ -1286,8 +1295,14 @@ void DestinyManager::Follow() {
         }
     }
 
-    heading.normalize();
-    m_targetPoint = target_point + (heading * m_targetDistance);
+    // See A379 §10 — Set m_targetPoint to the ACTUAL target position and update
+    // m_targetHeading every tick. This is the critical fix: Turn() uses m_targetHeading
+    // to compute the heading delta, and IsTurn() uses m_targetPoint for the target
+    // direction check. Both must reflect the current target position, not a stale
+    // value from BeginMovement().
+    toTarget.normalize();
+    m_targetPoint = target_point;
+    m_targetHeading = toTarget;
 
     MoveObject();
 }
