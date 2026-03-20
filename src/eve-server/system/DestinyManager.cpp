@@ -1273,6 +1273,30 @@ void DestinyManager::Follow() {
 
     // Distance checks — within follow range?
     if (surfaceDist <= m_followDistance) {
+        // See A379 §17 — Server-side AP gate jump.
+        // The client's autopilot.py Update() checks shipDestDistance < const.maxStargateJumpingDistance
+        // (2500m) and calls CmdStargateJump. However, the client NEVER sends CmdStargateJump in
+        // EVEmu due to an unknown client-side issue (possibly GetSurfaceDist mismatch, session
+        // state check, or opcode-level incompatibility in CCP's custom Python 2.5).
+        //
+        // Solution: when the Follow target is a stargate and the ship has autopilot active,
+        // the server directly initiates the jump. The client's OnSessionChanged handler
+        // (autopilot.py line 76) properly restarts the AP timer with ignoreTimerCycles=3,
+        // so AP continues seamlessly in the new system.
+        if (mySE->HasPilot() and mySE->GetPilot()->IsAutoPilot()
+            and m_targetEntity.second != nullptr and m_targetEntity.second->IsGateSE()) {
+            uint32 fromGateID = m_targetEntity.second->GetID();
+            uint32 toGateID = m_targetEntity.second->GetGateSE()->GetDestGateID();
+            if (toGateID > 0) {
+                _log(AUTOPILOT__MESSAGE, "Follow() AP auto-jump: %s(%u) at gate %u, dest gate %u, surfaceDist=%.0f",
+                    mySE->GetName(), mySE->GetID(), fromGateID, toGateID, surfaceDist);
+                mySE->GetPilot()->StargateJump(fromGateID, toGateID);
+                return;  // Don't continue Follow — jump is in progress
+            } else {
+                sLog.Error("DestinyManager::Follow", "AP auto-jump failed: gate %u has no destination gate!", fromGateID);
+            }
+        }
+
         if (mySE->HasPilot() and mySE->GetPilot()->IsAutoPilot()) {
             // See A379 §10 — For autopilot, slow to 10% but DON'T return early.
             // Must still update m_targetPoint/m_targetHeading and call MoveObject()
@@ -2108,20 +2132,17 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
     // from the last WarpUpdate tick's integer decelTime).
     SetPosition(finalPos);
 
-    // See A379 §15 — Client-driven autopilot jump (Attempt 12).
+    // See A379 §17 — Server-side AP gate jump from WarpStop.
     //
-    // The client's autopilot.py::Update() timer fires every 2s and checks:
-    //   if shipDestDistance < const.maxStargateJumpingDistance (2500m):
-    //       PerformSessionChange('autopilot', CmdStargateJump, destID, toCelestialID, shipID)
+    // When a ship warps to a gate with autopilot active and lands within jump range
+    // (< 2500m surface distance), the server directly initiates the jump. The client's
+    // autopilot.py::Update() should handle this, but due to an unknown client-side issue
+    // (CCP custom Python 2.5 opcode incompatibility, GetSurfaceDist mismatch, or session
+    // state check failure), the client NEVER sends CmdStargateJump. The client's
+    // OnSessionChanged handler properly restarts the AP timer in the new system.
     //
-    // This wrapper handles audio cues ("Approaching stargate", jump sound), AP state
-    // management (ignoreTimerCycles=5), and OnAutoPilotJump scatter events. Server-
-    // initiated jumps (Attempts 9-11) bypassed this wrapper, causing AP to disable
-    // because the client's PerformSessionChange never ran.
-    //
-    // The server's role: just STOP the ship at the gate and broadcast corrections.
-    // The client handles the rest. The 5 correction ticks ensure GetSurfaceDist()
-    // returns accurate distance (this was missing in Attempt 7, which failed).
+    // If the ship lands OUTSIDE jump range, we don't jump — the client will send
+    // CmdFollowBall to approach, and Follow() handles the jump when in range.
     if (mySE->HasPilot() and mySE->GetPilot()->IsAutoPilot()) {
         uint32 apGateID = mySE->GetPilot()->GetAPGateID();
         uint32 apDestGateID = mySE->GetPilot()->GetAPDestGateID();
@@ -2129,9 +2150,16 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
             SystemEntity* gateSE = mySE->SystemMgr()->GetSE(apGateID);
             if (gateSE != nullptr and gateSE->IsGateSE()) {
                 double distToGate = m_position.distance(gateSE->GetPosition()) - gateSE->GetRadius();
-                _log(AUTOPILOT__MESSAGE, "WarpStop: AP active, gate %u dest %u, surface dist %.0fm. "
-                        "Ship in STOP mode — waiting for client CmdStargateJump.",
+                _log(AUTOPILOT__MESSAGE, "WarpStop: AP active, gate %u dest %u, surface dist %.0fm.",
                         apGateID, apDestGateID, distToGate);
+                if (distToGate < 2500.0) {
+                    _log(AUTOPILOT__MESSAGE, "WarpStop: AP auto-jump! Within jump range (%.0fm < 2500m). "
+                            "Initiating StargateJump from %u to %u.", distToGate, apGateID, apDestGateID);
+                    mySE->GetPilot()->StargateJump(apGateID, apDestGateID);
+                } else {
+                    _log(AUTOPILOT__MESSAGE, "WarpStop: AP ship landed %.0fm from gate (> 2500m). "
+                            "Waiting for client Follow approach.", distToGate);
+                }
             } else {
                 _log(AUTOPILOT__MESSAGE, "WarpStop: AP gate %u not found in system, clearing", apGateID);
                 mySE->GetPilot()->ClearAPTargetGate();
@@ -2189,9 +2217,8 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
                 mySE->SysBubble()->GetID(), distFromCenter, (uint32)m_ballMode);
     }
 
-    // See A379 §15 — Ship stays in STOP mode. Client's AP timer (2s cycle)
-    // detects proximity via GetSurfaceDist() and sends CmdStargateJump if < 2500m,
-    // or CmdFollowBall if > 2500m (approach path). No server-side jump initiation.
+    // See A379 §17 — If ship is within jump range, StargateJump was already called above.
+    // If outside range, ship stays in STOP mode and client sends CmdFollowBall to approach.
 }
 
 //called whenever an entity is going away and can no longer be used as a target

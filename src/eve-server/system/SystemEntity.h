@@ -434,10 +434,12 @@ public:
     StructureSE* GetMySBU()                             { return m_sbuSE; }
     bool HasSBU()                                       { return (m_sbuSE != nullptr); }
     void SetSBU(StructureSE* pSE)                       { m_sbuSE = pSE; }
+    uint32 GetDestGateID()                              { return m_destGateID; }
 
 protected:
     PyRep*                      m_jumps;
     StructureSE*                m_sbuSE;
+    uint32                      m_destGateID;
 };
 
 

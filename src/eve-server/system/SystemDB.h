@@ -46,6 +46,7 @@ class SystemDB
 public:
     PyObject* ListFactions();
     static PyObject* ListJumps(uint32 gateID);
+    static uint32 GetDestGateID(uint32 gateID);
     static PyPackedRow* GetSolarSystemPackedRow(uint32 systemID);
 
     static bool GetWrecksToTypes(DBQueryResult& res);

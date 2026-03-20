@@ -55,6 +55,20 @@ PyObject* SystemDB::ListJumps(uint32 gateID) {
     return DBResultToRowset(res);
 }
 
+uint32 SystemDB::GetDestGateID(uint32 gateID) {
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT celestialID FROM mapJumps WHERE stargateID=%u LIMIT 1", gateID))
+    {
+        codelog(DATABASE__ERROR, "Error in GetDestGateID query: %s", res.error.c_str());
+        return 0;
+    }
+    DBResultRow row;
+    if (!res.GetRow(row))
+        return 0;
+    return row.GetUInt(0);
+}
+
 PyPackedRow* SystemDB::GetSolarSystemPackedRow(uint32 systemID) {
     DBQueryResult res;
     if (!sDatabase.RunQuery(res,

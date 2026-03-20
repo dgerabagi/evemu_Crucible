@@ -348,7 +348,8 @@ bool BeltSE::LoadExtras() {
 
 StargateSE::StargateSE(InventoryItemRef self, EVEServiceManager &services, SystemManager* system)
 : StaticSystemEntity(self, services, system),
-m_sbuSE(nullptr)
+m_sbuSE(nullptr),
+m_destGateID(0)
 {
 }
 
@@ -370,9 +371,14 @@ bool StargateSE::LoadExtras() {
     m_bubble->SetGate(true);
     _log(DESTINY__BUBBLE_DEBUG, "StargateSE::LoadExtras() - IsGate set to true for bubble %u.", m_bubble->GetID() );
     m_jumps = SystemDB::ListJumps(m_self->itemID());
-    if (m_jumps != nullptr)
+    m_destGateID = SystemDB::GetDestGateID(m_self->itemID());
+    if (m_jumps != nullptr) {
+        sLog.Warning("StargateSE", "LoadExtras(%u) '%s': jumps loaded successfully. groupID=%u destGate=%u",
+            m_self->itemID(), GetName(), m_self->groupID(), m_destGateID);
         return true;
+    }
 
+    sLog.Error("StargateSE", "LoadExtras(%u) '%s': m_jumps is NULL! ListJumps failed.", m_self->itemID(), GetName());
     return false;
 }
 
@@ -400,6 +406,11 @@ PyDict* StargateSE::MakeSlimItem() {
         slim->SetItemString("nameID",       PyStatic.NewNone());
     if (m_jumps != nullptr)
         slim->SetItemString("jumps", m_jumps->Clone());
+
+    sLog.Warning("StargateSE", "MakeSlimItem(%u): typeID=%u groupID=%u jumps=%s",
+        m_self->itemID(), m_self->typeID(), m_self->groupID(),
+        (m_jumps != nullptr) ? "present" : "NULL");
+
     return slim;
 }
 
