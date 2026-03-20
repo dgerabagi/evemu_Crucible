@@ -386,6 +386,12 @@ PyDict* StargateSE::MakeSlimItem() {
     PyDict *slim = new PyDict();
         //slim->SetItemString("dunRotation", rotation);
         slim->SetItemString("typeID",       new PyInt(m_self->typeID()));
+        // See A379 §16 — groupID is REQUIRED for the client's autopilot gate search.
+        // autopilot.py::Update() checks slimItem.groupID == const.groupStargate to
+        // identify gates in bp.balls. Without this, the gate is never found, destID
+        // stays None, and the AP timer returns silently — the root cause of 12 failed
+        // autopilot attempts.
+        slim->SetItemString("groupID",      new PyInt(m_self->groupID()));
         /** @todo (allan) make function to lookup controlling faction id for this */
         //  NOTE:  maybe not...logs show this is "1" for all items.
         slim->SetItemString("ownerID",      PyStatic.NewOne());

@@ -1434,21 +1434,20 @@ void Client::StargateJump(uint32 fromGate, uint32 toGate) {
     // add jump to mapDynamicData for showing in StarMap (F10)    -allan 06Mar14
     MapDB::AddJump(m_systemData.systemID);
 
-    // call Stop() per packet sniff - shuts off AP.  Halt() does also.  try not calling any movement updates
-    //pShipSE->DestinyMgr()->Halt();  // Stop() disables ap.  try Halt() to reset ship movement to null
+    // See A379 §16 — Halt() stops all ship movement during the gate jump animation.
+    // Halt() resets velocity, target, m_ballMode to STOP but does NOT clear m_autoPilot.
+    // This prevents the ship from drifting during the 4s animation delay.
+    pShipSE->DestinyMgr()->Halt();
     pShipSE->DestinyMgr()->SendJumpOut(fromGate);
     //  show gate animation in from gate.   -working -allan 15Nov15
     pShipSE->DestinyMgr()->SendGateActivity(fromGate);
 
-    //m_toGate = toGate;
     StaticData toData = StaticData();
     if (!sDataMgr.GetStaticInfo(toGate, toData)) {
         _log(DATA__ERROR, "Failed to retrieve data for stargate %u", toGate);
         /** @todo  send error to client here */
         return;
     }
-
-    // this is where we can put the msgs about system closed or w/e
 
     // add jump to mapDynamicData for showing in StarMap (F10)    -allan 06Mar14
     MapDB::AddJump(toData.systemID);
@@ -1460,17 +1459,28 @@ void Client::StargateJump(uint32 fromGate, uint32 toGate) {
     m_movePoint.MakeRandomPointOnSphereLayer(toData.radius + 6500, toData.radius + 9500);
     m_moveSystemID = toData.systemID;
 
-    // See A379 §12 — Execute jump immediately instead of using a 4s timer.
-    // The client's PerformSessionChange('autopilot', CmdStargateJump, ...) expects
-    // the session to change before the RPC returns. With the old 4s timer, the
-    // session change was sent as a pushed notification 4s after CmdStargateJump
-    // returned, breaking the client's autopilot state — PerformSessionChange saw
-    // no session change and the client disabled AP. By executing immediately, the
-    // session change is queued before the CmdStargateJump response, so the client
-    // sees the session changed when PerformSessionChange completes.
-    // The JumpOut animation (sent above) plays on the client independently.
-    m_clientState = Player::State::Jump;
-    ExecuteJump();
+    // See A379 §16 — Restore 4s jump timer for proper gate animation.
+    //
+    // The immediate-execution approach (Attempt 9b/12) was implemented to make
+    // the session change arrive before the CmdStargateJump RPC response, which
+    // was thought necessary for PerformSessionChange. However:
+    //
+    // 1. The root cause of AP failure was actually the missing groupID in
+    //    StargateSE::MakeSlimItem() — the AP timer never found the gate at all.
+    //    AP never attempted CmdStargateJump, so the PerformSessionChange timing
+    //    was never the real issue.
+    //
+    // 2. PerformSessionChange blocks and waits for session change (via
+    //    _WaitForSessionChange). The 4s delayed session change is within the
+    //    timeout. During the wait, session.changing is True, which causes the
+    //    AP timer to safely return (checked at offset 797 in Update() bytecode).
+    //
+    // 3. Immediate execution causes the client ballpark to tear down before the
+    //    jump animation plays — resulting in "black screen teleport" instead of
+    //    the proper gate vortex + tunnel VFX sequence.
+    //
+    // With the timer: effects play → 4s animation → ExecuteJump → session change.
+    SetStateTimer(Player::State::Jump, Player::Timer::Jumping);
 }
 
 void Client::CynoJump(InventoryItemRef beacon) {
