@@ -898,7 +898,11 @@ void Client::SetBallPark() {
         m_ballparkTimer.Disable();
         if (IsGateJump()) {
             SetInvulTimer(Player::Timer::JumpInvul);
-            // dont use timer method here...(jumping ship will flash at destination)
+            // See A379 §17 — Gate cloak: must actually cloak the ship, not just start the
+            // uncloak countdown timer. The original code only called m_cloakTimer.Start()
+            // (to avoid a "flash"), but never called Cloak(), so ships were never cloaked
+            // after jumping. We call Cloak() directly here, then start the timer for uncloak.
+            pShipSE->DestinyMgr()->Cloak();
             m_cloakTimer.Start(Player::Timer::JumpCloak);
             m_clientState = Player::State::Idle;
         }
@@ -909,6 +913,8 @@ void Client::SetBallPark() {
         }
         if (IsWormholeJump()) {
             SetInvulTimer(Player::Timer::JumpInvul);
+            // See A379 §17 — Same gate cloak fix for wormhole jumps.
+            pShipSE->DestinyMgr()->Cloak();
             m_cloakTimer.Start(Player::Timer::JumpCloak);
             m_clientState = Player::State::Idle;
         }
