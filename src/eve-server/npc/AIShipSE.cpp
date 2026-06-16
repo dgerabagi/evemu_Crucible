@@ -30,9 +30,21 @@
 
 #include "EntityList.h"
 #include "npc/AIShipSE.h"
+#include "npc/Drone.h"               // VEV_DRONE: DroneSE
+#include "inventory/AttributeEnum.h" // VEV_DRONE: AttrDroneBandwidth*
 #include "system/Damage.h"
 #include "system/SystemManager.h"
 #include "system/SystemBubble.h"
+#include "Client.h"
+#include "map/MapDB.h"
+#include "system/Container.h"
+#include "inventory/ItemFactory.h"
+#include "inventory/Inventory.h"
+#include "account/AccountService.h"  // VEV_SIM_AISHIPTAIL_INC: TransferFunds (insurance payout)
+#include "ship/Ship.h"               // VEV_SIM_AISHIPTAIL_INC: ShipSE recharge reference + invGroups::Rookieship
+#include "ship/ShipDB.h"             // VEV_SIM_AISHIPTAIL_INC: Get/DeleteShipInsurance
+#include "EVE_Corp.h"                // VEV_SIM_AISHIPTAIL_INC: corpSCC
+#include "EVE_Wallet.h"              // VEV_SIM_AISHIPTAIL_INC: Journal::EntryType::Insurance
 
 #define AISHIP_PROCESS_TICK_MS 5000
 
@@ -102,6 +114,95 @@ void AIShipSE::Process() {
                 charge = capacity;
             m_self->SetAttribute(AttrShieldCharge, charge);
             m_shieldCharge = charge;
+        }
+
+        // VEV_SIM_CAPRECHARGE: cap recharge leg for the phantom path, mirroring
+        // ShipSE::Process (Ship.cpp:2472-2483). AIShipSE is a sibling of ShipSE, so the
+        // base ShipSE::CalculateRechargeRate is unreachable here -> its pure-math curve
+        // (Ship.cpp:2418-2439, byte-equal arithmetic) is inlined below; NOT a new model.
+        {
+            float capCharge   = m_self->GetAttribute(AttrCapacitorCharge).get_float();
+            float capCapacity = m_self->GetAttribute(AttrCapacitorCapacity).get_float();
+            if (capCharge < capCapacity) {
+                // ---- inlined ShipSE::CalculateRechargeRate(Capacity, Current, RechargeTimeMS) ----
+                float RechargeTimeMS = m_self->GetAttribute(AttrRechargeRate).get_float();
+                RechargeTimeMS = (RechargeTimeMS < 1 ? 1 : RechargeTimeMS);
+                float Current = (capCharge < 1 ? 1 : capCharge);
+                float Cmax = (capCapacity < 1 ? 1 : capCapacity);
+                float tau = (RechargeTimeMS / 5000.0);
+                float Cmax2_tau = ((Cmax * 2) / tau);
+                float C_Cmax = (Current / Cmax);
+                float sC_Cmax = sqrt(C_Cmax);
+                float rechargeRate = (Cmax2_tau * (sC_Cmax - C_Cmax));  // Gj/sec
+                // ---- end inlined curve ----
+                float newCapCharge = capCharge + ((m_processTimerTick / 1000) * rechargeRate);
+                if (newCapCharge > capCapacity) {
+                    newCapCharge = capCapacity;
+                } else if ((capCapacity - newCapCharge) < 0.3) {
+                    newCapCharge = capCapacity;
+                }
+                m_self->SetAttribute(AttrCapacitorCharge, newCapCharge);
+            }
+        }
+    }
+
+    // dock_at procedure: once a pending dock target is within docking range,
+    // dock. The dock command despawns THIS entity, so return immediately after.
+    if (m_pendingDockStationID != 0 && m_system != nullptr) {
+        SystemEntity* pStation = m_system->GetSE(m_pendingDockStationID);
+        if (pStation != nullptr) {
+            // VEV_DOCKGATE_RADIUS (2026-06-13): mirror dock_at EXACTLY so an AI
+            // pilot docks at ANY station, not just the one it spawned at.
+            // DistanceTo2 returns PLAIN distance (SystemEntity.cpp: GetPosition().
+            // distance) — the sqrt() here re-broke it (A371 Bug22.3), and the flat
+            // 9500m gate ignored station radius: on a big station (Myyhera III hull
+            // 48km, Deepari 29km) 9500m-from-CENTER is ~40km INSIDE the hull,
+            // unreachable, so the pilot crawled forever and never docked. Raw
+            // distance + (2500 + radius) + warp-when-far = first-class docking.
+            double dist = DistanceTo2(pStation);          // plain meters, NOT sqrt(d)
+            const double DOCK_GATE = 2500.0 + pStation->GetRadius();
+            if (dist <= DOCK_GATE) {
+                uint32 stID = m_pendingDockStationID;
+                m_pendingDockStationID = 0;   // cleared only when the dock will pass the gate
+                char dp[64];
+                snprintf(dp, sizeof(dp), "{\"stationID\": %u}", stID);
+                std::string rmsg;
+                sEntityList.ExecuteAICommand(m_charID, "dock", dp, rmsg);
+                return;  // dock despawned us — do not touch `this`
+            } else if (dist <= 150000.0) {
+                // within grid but outside the dock gate: close the gap sublight,
+                // pending stays set so we re-check + dock once inside.
+                // VEV_DOCK_GOTO_ALIGN: guard like the warp branch -- re-issuing
+                // GotoPoint EVERY tick resets the GOTO accel ramp (m_stateStamp) so
+                // activeSpeedFraction never climbs -> the ship crawls at ~96 m/s and
+                // never reaches the dock gate (XPL-Pathfinder, 2026-06-15). Issue it
+                // once; the station is stationary so the target never needs updating.
+                if (DestinyMgr()->GetState() != Destiny::Ball::Mode::GOTO)
+                    DestinyMgr()->GotoPoint(pStation->GetPosition());
+            } else if (DestinyMgr()->GetState() != Destiny::Ball::Mode::WARP) {
+                // VEV_DOCK_WARP_ALIGN: guard on the WARP ball-mode, NOT IsWarping().
+                // IsWarping() only flips true at InitWarp (active warp); during the
+                // multi-second align-to-warp phase m_warpState is still null, so the
+                // old !IsWarping() guard re-issued WarpTo EVERY tick -> reset the align
+                // (m_stateStamp) -> m_timeFraction never reached 0.749 -> InitWarp never
+                // fired -> the ship aligned forever at ~96 m/s and never docked
+                // (XPL-Pathfinder Cheetah, 2026-06-15). WarpTo sets m_ballMode=WARP up
+                // front, so GetState()!=WARP correctly means "not yet aligning/warping".
+                // far AND not already warping (warp finished short, or drifted):
+                // warp to just OUTSIDE the hull. GUARD on IsWarping() — re-issuing
+                // WarpTo every tick RE-INITS the in-flight warp so it never moves
+                // (the bug that left a hauler crawling 15 AU at ~1 m/s, 2026-06-13).
+                // VEV_DOCK_WARP_TO_ZERO (2026-06-16): EVE "warp to 0" lands 0-2500m from the
+                // station perimeter -- a TWO-STEP arrival (warp decel -> settle -> dock on a
+                // later tick), never an instant dock-from-warp, and only RARELY a minor
+                // sublight gap to close. Land mostly inside the radius+2500 dock gate; ~1 in 6
+                // just outside so the GOTO approach above closes a small gap (curator-corrected
+                // EVE behavior, replacing the old flat 15km approach).
+                double vevLandGap = (double)MakeRandomInt(0, 2500);
+                if (MakeRandomInt(0, 5) == 0) vevLandGap = (double)MakeRandomInt(2500, 3500);
+                DestinyMgr()->WarpTo(pStation->GetPosition(), pStation->GetRadius() + vevLandGap);
+            }
+            // else far but warping: let the in-flight warp complete — do nothing.
         }
     }
 }
@@ -187,9 +288,10 @@ void AIShipSE::EncodeDestiny(Buffer& into) {
         head.entityID = GetID();
         head.mode = mode;
         head.radius = GetRadius();
-        head.posX = x();
-        head.posY = y();
-        head.posZ = z();
+        GPoint _dpos = m_destiny->GetPosition();   // VEV: x()=m_self->position() is STALE for phantoms (destiny never syncs it back to the item) -> client renders the ship at its SPAWN point -> '1.$ AU' / wrong distance. Send the LIVE destiny position.
+        head.posX = _dpos.x;
+        head.posY = _dpos.y;
+        head.posZ = _dpos.z;
         // IsInteractive: client treats this as a piloted ship (right-click, show info, etc.)
         head.flags = Ball::Flag::IsInteractive | Ball::Flag::IsFree;
     into.Append(head);
@@ -217,7 +319,7 @@ void AIShipSE::EncodeDestiny(Buffer& into) {
                 warp.targY = target.y;
                 warp.targZ = target.z;
                 warp.speed = m_destiny->GetWarpSpeed();
-                warp.effectStamp = -1;
+                warp.effectStamp = m_destiny->GetStateStamp(); // VEV_DESYNC_AISHIP_WARP: real warp-start stamp on AI-ship path (agents fly these)
                 warp.followRange = 0;
                 warp.followID = 0;
             into.Append(warp);
@@ -268,8 +370,107 @@ void AIShipSE::MakeDamageState(DoDestinyDamageState& into) {
     into.structure = (hullHP > 0.0f) ? (1.0 - (m_self->GetAttribute(AttrDamage).get_float() / hullHP)) : 1.0;
 }
 
+// VEV_DRONE: AI-pilot drone bridge. Phantom AIShipSE has no Client*, so the launch
+// path (normally ShipSE::LaunchDrone via the EVE client) is reimplemented here,
+// Client*-free, and driven by the ai_command_queue drone verbs in EntityList.
+bool AIShipSE::LaunchDrone(InventoryItemRef dRef, const FactionData& data) {
+    dRef->Move(GetLocationID(), flagNone, true);
+    dRef->ChangeSingleton(true);
+    GPoint position(GetPosition());
+    position.MakeRandomPointOnSphere(500.0);
+    dRef->SetPosition(position);
+    DroneSE* pDrone = new DroneSE(dRef, GetServices(), SystemMgr(), data);
+    pDrone->Launch(this);   // 'this' is a SystemEntity* controller (VEV_DRONE decouple)
+    m_drones.emplace(dRef->itemID(), dRef.get());
+    EvilNumber load = GetSelf()->GetAttribute(AttrDroneBandwidthLoad);
+    load += dRef->GetAttribute(AttrDroneBandwidthUsed);
+    if (load <= GetSelf()->GetAttribute(AttrDroneBandwidth)) {
+        pDrone->Online();
+        pDrone->IdleOrbit();  // VEV_DRONE: SetIdle() early-returns on an already-Idle fresh drone; orbit the carrier explicitly
+        GetSelf()->SetAttribute(AttrDroneBandwidthLoad, load, false);
+        return true;
+    }
+    return false;  // launched but inert (no bandwidth)
+}
+
+uint8 AIShipSE::LaunchAllDrones(const FactionData& data) {
+    Inventory* inv = GetSelf()->GetMyInventory();
+    if (inv == nullptr)
+        return 0;
+    if (!inv->ContentsLoaded())
+        inv->LoadContents();
+    std::vector<InventoryItemRef> bay;
+    inv->GetItemsByFlag(flagDroneBay, bay);
+    uint8 launched = 0;
+    for (InventoryItemRef dRef : bay) {
+        if (dRef.get() == nullptr)
+            continue;
+        if (dRef->categoryID() != EVEDB::invCategories::Drone)
+            continue;
+        if (m_drones.find(dRef->itemID()) != m_drones.end())
+            continue;  // already in space
+        if (LaunchDrone(dRef, data))
+            ++launched;
+    }
+    return launched;
+}
+
+void AIShipSE::EngageDrones(SystemEntity* pTarget) {
+    if (pTarget == nullptr)
+        return;
+    for (auto& cur : m_drones) {
+        SystemEntity* pSE = SystemMgr()->GetSE(cur.first);
+        if ((pSE != nullptr) and pSE->IsDroneSE()) {
+            DroneSE* pDrone = pSE->GetDroneSE();
+            if (pDrone->IsEnabled())
+                pDrone->GetAI()->Target(pTarget);  // StartTargeting -> CheckDistance -> Attack
+        }
+    }
+}
+
+void AIShipSE::ReturnAllDrones() {
+    std::vector<uint32> ids;
+    for (auto& cur : m_drones)
+        ids.push_back(cur.first);
+    for (uint32 id : ids) {
+        SystemEntity* pSE = SystemMgr()->GetSE(id);
+        if ((pSE == nullptr) or !pSE->IsDroneSE())
+            continue;
+        InventoryItemRef iRef = pSE->GetSelf();
+        if (iRef.get() != nullptr) {
+            iRef->ChangeOwner(m_charID, true);
+            iRef->Move(GetSelf()->itemID(), flagDroneBay, true);
+            EvilNumber load = GetSelf()->GetAttribute(AttrDroneBandwidthLoad);
+            load -= iRef->GetAttribute(AttrDroneBandwidthUsed);
+            GetSelf()->SetAttribute(AttrDroneBandwidthLoad, load, false);
+        }
+        m_drones.erase(id);
+        SystemMgr()->RemoveEntity(pSE);
+        SafeDelete(pSE);
+    }
+}
+
+// VEV_DRONE: remove launched drone SEs so a dying/despawning ship can't leave drones
+// pointing m_assignedShip at freed memory.
+void AIShipSE::CleanupDrones() {
+    std::vector<uint32> ids;
+    for (auto& cur : m_drones)
+        ids.push_back(cur.first);
+    for (uint32 id : ids) {
+        SystemEntity* pSE = (m_system != nullptr) ? m_system->GetSE(id) : nullptr;
+        if (pSE != nullptr) {
+            if (m_system != nullptr)
+                m_system->RemoveEntity(pSE);
+            SafeDelete(pSE);
+        }
+    }
+    m_drones.clear();
+}
+
 void AIShipSE::Despawn() {
     sLog.Cyan("AIShipSE::Despawn", "Removing AI ship for char %u (%s)", m_charID, m_charName.c_str());
+
+    CleanupDrones();  // VEV_DRONE
 
     // Remove from EntityList AI ship tracking
     sEntityList.RemoveAIShip(m_charID);
@@ -288,9 +489,130 @@ void AIShipSE::Killed(Damage& damage) {
 
     sLog.Cyan("AIShipSE::Killed", "AI ship for char %u (%s) was destroyed", m_charID, m_charName.c_str());
 
+    CleanupDrones();  // VEV_DRONE
+
     // Remove from EntityList tracking
     sEntityList.RemoveAIShip(m_charID);
 
-    // TODO: create wreck container (follow NPC::Killed pattern) and drop loot
-    m_destiny->SendJettisonPacket();
+    // VEV_HARVEST_WRECKLOOT: ported from NPC::Killed (NPC.cpp:299) — killer resolution,
+    // bounty + security status, wreck container + loot drop. Helpers inherited via DynamicSystemEntity.
+    {
+        uint32 killerID = 0;
+        Client* pClient = nullptr;
+        SystemEntity* killer = damage.srcSE;
+        uint32 allyID = 0;
+        if (killer != nullptr) {
+            allyID = killer->GetAllianceID();
+            if (killer->HasPilot()) {
+                pClient = killer->GetPilot();
+                if (pClient != nullptr) killerID = pClient->GetCharacterID();
+            } else if (killer->IsDroneSE()) {
+                pClient = sEntityList.FindClientByCharID(killer->GetSelf()->ownerID());
+                if (pClient != nullptr) killerID = pClient->GetCharacterID();
+            } else {
+                killerID = killer->GetID();
+            }
+        }
+
+        uint32 locationID = GetLocationID();
+        MapDB::AddKill(locationID);
+        MapDB::AddFactionKill(locationID);
+
+        if (pClient != nullptr) {
+            AwardBounty(pClient);
+            if (m_system->GetSystemSecurityRating() > 0)
+                AwardSecurityStatus(m_self, pClient->GetChar().get());
+        }
+
+        GPoint wreckPosition = m_destiny->GetPosition();
+        if (!wreckPosition.isNaN()) {
+            uint32 wreckTypeID = sDataMgr.GetWreckID(m_self->typeID());
+            if (!IsWreckTypeID(wreckTypeID))
+                wreckTypeID = 26557; // generic frigate wreck fallback (per NPC::Killed)
+
+            std::string wreck_name = m_self->itemName();
+            wreck_name += " Wreck";
+            // VEV_SALVAGE_FACTION: key the wreck's salvage table by the victim
+            // hull's race faction (customInfo feeds StaticDataMgr::GetSalvage;
+            // it was 0 -> AI-pilot wrecks salvaged to NOTHING).
+            uint32 svFaction = 0;
+            switch (m_self->type().race()) {
+                case 1: svFaction = 500001; break;  // Caldari State
+                case 2: svFaction = 500002; break;  // Minmatar Republic
+                case 4: svFaction = 500003; break;  // Amarr Empire
+                case 8: svFaction = 500004; break;  // Gallente Federation
+                default: svFaction = 500001; break; // unraced hull -> Caldari T1 table
+            }
+            ItemData wreckItemData(wreckTypeID, m_charID, locationID, flagNone, wreck_name.c_str(), wreckPosition, itoa(svFaction)); // VEV_V6 + VEV_SALVAGE_FACTION
+            WreckContainerRef wreckItemRef = sItemFactory.SpawnWreckContainer(wreckItemData);
+            if (wreckItemRef.get() != nullptr) {
+                if (MakeRandomFloat() < sConfig.npc.LootDropChance)
+                    DropLoot(wreckItemRef, m_self->groupID(), killerID);
+
+                // VEV_HARVEST_CARGODROP: drop ~50% of the victim's modules + rigs + cargo into the wreck (real EVE).
+                if (m_self->GetMyInventory() != nullptr) {
+                    m_self->GetMyInventory()->LoadContents();  // VEV: cargo hold is lazy-loaded; force in-memory before enumerating
+                    std::vector<InventoryItemRef> drop;
+                    m_self->GetMyInventory()->GetItemsByFlagRange(flagLowSlot0, flagHiSlot7, drop);
+                    m_self->GetMyInventory()->GetItemsByFlagRange(flagRigSlot0, flagRigSlot7, drop);
+                    m_self->GetMyInventory()->GetItemsByFlagRange(flagCargoHold, flagCargoHold, drop);
+                    for (auto& dItem : drop) {
+                        if (dItem.get() == nullptr) continue;
+                        if (MakeRandomFloat() < 0.5f) {
+                            // VEV v3: spawn a COPY into the wreck (mirrors DropLoot) so the wreck in-memory
+                            // inventory holds it and the CLIENT sees it on open; Move() only updated the DB row.
+                            ItemData vevLoot(dItem->typeID(), m_charID, wreckItemRef->itemID(), flagNone, dItem->quantity());
+                            wreckItemRef->AddItem(sItemFactory.SpawnItem(vevLoot));
+                        }
+                    }
+                }
+
+                DBSystemDynamicEntity wreckEntity = DBSystemDynamicEntity();
+                wreckEntity.allianceID = 0; // VEV_V6: zero (AI killer has no valid alliance -> AddBall deref)
+                wreckEntity.categoryID = EVEDB::invCategories::Celestial;
+                wreckEntity.corporationID = 0; // VEV_V6
+                wreckEntity.factionID = 0; // VEV_V6
+                wreckEntity.groupID = EVEDB::invGroups::Wreck;
+                wreckEntity.itemID = wreckItemRef->itemID();
+                wreckEntity.itemName = wreck_name;
+                wreckEntity.ownerID = m_charID; // VEV_V5 wreck owner = victim char (killerID=ship-id for AI kills poisons the grid)
+                wreckEntity.typeID = wreckTypeID;
+                wreckEntity.position = wreckPosition;
+                if (!m_system->BuildDynamicEntity(wreckEntity, m_self->itemID())) {
+                    sLog.Error("AIShipSE::Killed()", "Spawning wreck failed for typeID %u", wreckTypeID);
+                    wreckItemRef->Delete();
+                }
+            } else {
+                sLog.Error("AIShipSE::Killed()", "Creating wreck item failed for type %u", wreckTypeID);
+            }
+        } else {
+            sLog.Error("AIShipSE::Killed()", "Wreck position is NaN; no wreck spawned");
+        }
+    }
+    // VEV_GUARD_AISHIPTAIL_PHANTOM: gate the Client*-touching death-tail
+    // (insurance payout + jettison packet) on a live owner Client*. Phantom
+    // AIShipSE instances (no Client* for m_ownerID) skip both operations;
+    // wreck spawn + aggro resolution above are unaffected. Predicate per
+    // prior crash agent's recommendation.
+    if (sEntityList.FindClientByCharID(m_ownerID) != nullptr) {
+        // VEV_SIM_INSURANCE: phantom death-tail insurance payout, ported from
+        // ShipSE::PayInsurance (Ship.cpp:2503-2521). Skip rookie ships; pay corpSCC -> owner the
+        // GetShipInsurancePayout amount (flat 15000 ISK fallback when no shipInsurance row -- the
+        // payout read is Client*-free, SIMLAYER verify-on-implement #1), then delete the row.
+        if (m_self->groupID() != EVEDB::invGroups::Rookieship) {
+            ShipDB insDb;  // ShipDB is default-constructible (: ServiceDB); GetShipInsurancePayout is pure SQL
+            std::string insReason = "Insurance payment for loss of the ship ";
+            insReason += m_self->itemName();
+            AccountService::TransferFunds(
+                corpSCC,
+                m_ownerID,
+                insDb.GetShipInsurancePayout(m_self->itemID()),
+                insReason,
+                Journal::EntryType::Insurance,
+                m_self->typeID()
+            );
+            ShipDB::DeleteInsuranceByShipID(m_self->itemID());
+        }
+        m_destiny->SendJettisonPacket();
+    }
 }
