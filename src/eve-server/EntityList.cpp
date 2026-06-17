@@ -7046,6 +7046,10 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         uint32 moduleID = 0;
         size_t mPos = p.find("\"moduleID\"");
         if (mPos != std::string::npos) { size_t c = p.find(":", mPos); if (c != std::string::npos) moduleID = (uint32)atol(p.c_str() + c + 1); }
+        // VEV_XPL_FORCE: human 2D-client hacks come pre-decided by the client minigame
+        // (the skill check happens there). force=true commits the loot without re-rolling.
+        bool vevForce = false;
+        { size_t fp = p.find("\"force\""); if (fp != std::string::npos) { size_t tp = p.find("true", fp); size_t cp = p.find(",", fp); size_t bp = p.find("}", fp); if (tp != std::string::npos && (cp == std::string::npos || tp < cp) && (bp == std::string::npos || tp < bp)) vevForce = true; } }
         if (sigID.empty()) { resultMsg = "missing 'sigID' in params"; return false; }
         SystemManager* pSystem = pAIShip->SystemMgr();
         if (pSystem == nullptr) { resultMsg = "AI ship has no system"; return false; }
@@ -7097,7 +7101,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         int hchance = 45 + vevSkillLvl * 8 + hbonus - vevDiff;
         if (hchance > 95) hchance = 95;
         if (hchance < 15) hchance = 15;
-        if (MakeRandomInt(0, 100) >= hchance) {
+        if (!vevForce && MakeRandomInt(0, 100) >= hchance) {
             char hfail[128];
             snprintf(hfail, sizeof(hfail), "hack failed (%d%% chance) - cycle again", hchance);
             resultMsg = hfail;

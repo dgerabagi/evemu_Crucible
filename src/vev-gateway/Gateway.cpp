@@ -59,6 +59,7 @@
 #include <map>
 #include <string>
 #include <thread>
+#include <chrono>
 #include <unordered_map>
 
 namespace beast     = boost::beast;
@@ -269,6 +270,108 @@ static bool enqueueAICommand(uint32_t charID, const std::string& command,
         return false;
     }
     return true;
+}
+
+// ── VEV_XPL_SCAN: human 2D-client cosmic-signature scanning ──────────────────
+// The human reuses the SAME EntityList scan verbs the AI pilots run
+// (get_signatures / warp_to_signature / analyze), bridged via ai_command_queue.
+// get_signatures + analyze need the RESULT back, so we enqueue with RunQueryLID to
+// capture the row id and poll it to a terminal status (the eve-server loop drains the
+// queue on the game thread). warp_to_signature is fire-and-forget like undock. The
+// client parses the raw result_msg (same format the AI scan FSM regexes).
+static uint32_t enqueueAICommandLID(uint32_t charID, const std::string& command,
+                                    const std::string& params) {
+    std::string escCmd, escParams;
+    sDatabase.DoEscapeString(escCmd, command);
+    sDatabase.DoEscapeString(escParams, params);
+    DBerror err; uint32_t rowID = 0;
+    if (!sDatabase.RunQueryLID(err, rowID,
+        "INSERT INTO ai_command_queue (charID, command, params, status) "
+        "VALUES (%u, '%s', '%s', 'pending')",
+        charID, escCmd.c_str(), escParams.c_str())) {
+        std::cerr << "[vev-gateway] enqueueAICommandLID(" << command
+                  << ") failed: " << err.c_str() << std::endl;
+        return 0;
+    }
+    return rowID;
+}
+
+// Poll an ai_command_queue row to a terminal status; returns result_msg (empty on
+// timeout). Blocks the WS handler thread up to ~timeoutMs -- fine for a user click.
+static std::string pollAIResult(uint32_t rowID, int timeoutMs, bool* okOut = nullptr) {
+    if (okOut) *okOut = false;
+    if (rowID == 0) return "";
+    const int stepMs = 75;
+    for (int waited = 0; waited <= timeoutMs; waited += stepMs) {
+        DBQueryResult res;
+        if (sDatabase.RunQuery(res,
+            "SELECT status, result_msg FROM ai_command_queue WHERE id = %u", rowID)) {
+            DBResultRow row;
+            if (res.GetRow(row)) {
+                std::string st = row.GetText(0) ? std::string(row.GetText(0)) : "";
+                if (st == "done" || st == "failed") {
+                    if (okOut) *okOut = (st == "done");
+                    return row.GetText(1) ? std::string(row.GetText(1)) : "";
+                }
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(stepMs));
+    }
+    return "";
+}
+
+// getSignatures — relic/data cosmic signatures in the player's current system. Works
+// docked or in space (the verb reads chrCharacters.solarSystemID when no ship ball).
+static json handleGetSignatures(const json& payload) {
+    if (!payload.is_object() || !payload.contains("characterID"))
+        throw std::runtime_error("payload requires { characterID }");
+    uint32_t characterID = payload.at("characterID").get<uint32_t>();
+    uint32_t rid = enqueueAICommandLID(characterID, "get_signatures", "{}");
+    bool ok = false;
+    std::string raw = pollAIResult(rid, 4000, &ok);
+    return json{{"ok", ok}, {"raw", raw}};
+}
+
+// warpToSignature — undock (idempotent) then warp the player's ship to a sig beacon.
+// Async like undock: the ball moves on subsequent grid:snapshots. params {characterID,
+// sigID, distance?}.
+static json handleWarpToSignature(const json& payload) {
+    if (!payload.is_object() || !payload.contains("characterID") || !payload.contains("sigID"))
+        throw std::runtime_error("payload requires { characterID, sigID }");
+    uint32_t characterID = payload.at("characterID").get<uint32_t>();
+    std::string sigID = payload.at("sigID").get<std::string>();
+    enqueueAICommand(characterID, "login_docked", "{}");
+    enqueueAICommand(characterID, "undock", "{}");
+    json wp = json{{"sigID", sigID}};
+    if (payload.contains("distance")) wp["distance"] = payload.at("distance");
+    const bool ok = enqueueAICommandLID(characterID, "warp_to_signature", wp.dump()) != 0;
+    return json{{"ok", ok}, {"queued", ok}};
+}
+
+// analyze — commit a hack the human already won in the client minigame. We resolve the
+// player's fitted Codebreaker/Analyzer (Data Miners, groupID 538) and pass force=true so
+// the engine skips its own skill roll: the minigame WAS the skill check ("fake the
+// minigame, not the grid"). The engine drops real loot to cargo + consumes the site.
+static json handleAnalyze(const json& payload) {
+    if (!payload.is_object() || !payload.contains("characterID") || !payload.contains("sigID"))
+        throw std::runtime_error("payload requires { characterID, sigID }");
+    uint32_t characterID = payload.at("characterID").get<uint32_t>();
+    std::string sigID = payload.at("sigID").get<std::string>();
+    uint32_t moduleID = 0;
+    DBQueryResult mres;
+    if (sDatabase.RunQuery(mres,
+        "SELECT e.itemID FROM entity e JOIN invTypes t ON t.typeID = e.typeID "
+        "WHERE e.ownerID = %u AND t.groupID = 538 AND e.flag BETWEEN 11 AND 34 LIMIT 1",
+        characterID)) {
+        DBResultRow mrow; if (mres.GetRow(mrow)) moduleID = mrow.GetUInt(0);
+    }
+    if (moduleID == 0)
+        return json{{"ok", false}, {"raw", "no Data/Relic Analyzer fitted"}};
+    json ap = json{{"sigID", sigID}, {"moduleID", moduleID}, {"force", true}};
+    uint32_t rid = enqueueAICommandLID(characterID, "analyze", ap.dump());
+    bool ok = false;
+    std::string raw = pollAIResult(rid, 5000, &ok);
+    return json{{"ok", ok}, {"raw", raw}};
 }
 
 static json handleUndock(const json& payload) {
@@ -7419,6 +7522,9 @@ static const std::unordered_map<std::string, HandlerFn>& handlerTable() {
         {"getMarketTypes",       handleGetMarketTypes},
         {"getMarketOrders",      handleGetMarketOrders},
         {"marketBuy",            handleMarketBuy},
+        {"getSignatures",        handleGetSignatures},    // VEV_XPL_SCAN
+        {"warpToSignature",      handleWarpToSignature},  // VEV_XPL_SCAN
+        {"analyze",              handleAnalyze},          // VEV_XPL_SCAN
         {"getStationGuests",     handleGetStationGuests},
         {"getLocalMembers",      handleGetLocalMembers},
         {"getStationAgents",     handleGetStationAgents},
