@@ -4534,6 +4534,23 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         for (auto& kv : statics)
             entities.emplace(kv.first, kv.second);
 
+        // VEV_XPL_OVERVIEW_CANS: relic/data site cans spawn into the system but can land
+        // in a bubble the warp-in pilot never joins (orphaned site pocket). GridStreamer
+        // already streams group-306 cans system-wide, so the CCTV shows the site while the
+        // pilot's bubble does not -- the explorer then can't approach what it sees. Mirror
+        // GridStreamer: pull nearby group-306 Spawn Containers from the system manager so
+        // the AI's overview matches what is actually rendered at the site it warped to.
+        SystemManager* pSM = pAIShip->SystemMgr();
+        if (pSM != nullptr) {
+            for (auto& kv : pSM->GetEntities()) {
+                SystemEntity* cse = kv.second;
+                if (cse == nullptr || cse->GetGroupID() != 306) continue;
+                if (entities.find(kv.first) != entities.end()) continue;
+                if (pAIShip->DistanceTo2(cse) <= 250000.0)  // site pocket ~12km; 250km slack
+                    entities.emplace(kv.first, cse);
+            }
+        }
+
         sLog.Cyan("get_overview", "GetEntities returned %zu dynamic + %zu static = %zu total from bubble %u",
             entities.size() - statics.size(), statics.size(), entities.size(), pBubble->GetID());
 
@@ -4554,6 +4571,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             else if (se->IsStationSE()) category = "station";
             else if (se->IsDroneSE())  category = "drone";  // VEV_DRONE
             else if (se->IsGateSE())   category = "gate";
+            else if (se->GetGroupID() == 306) category = "container";  // VEV_XPL: relic/data site cans (any SE class, matches GridStreamer)
             else continue;  // skip celestials, belts, etc.
 
             // See A371 Bug22.3 — DistanceTo2 returns actual distance (not squared).
@@ -7049,7 +7067,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             return false;
         }
         const double hackDist = pAIShip->GetPosition().distance(sigHit.position);
-        if (hackDist > 100000.0) {
+        if (hackDist > 30000.0) {   // VEV_XPL: must be AT the site (approach the cans), not a 100km range-hack
             char hbuf2[128];
             snprintf(hbuf2, sizeof(hbuf2), "too far from site: %.0fm (warp to the signature first)", hackDist);
             resultMsg = hbuf2;
