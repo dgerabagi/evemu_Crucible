@@ -293,6 +293,13 @@ bool DungeonMgr::MakeDungeon(CosmicSignature& sig, uint32 dungeonID)
         sDunDataMgr.GetDungeon(dData, dungeonID);
     }
 
+    // VEV_SIG_NAME: CreateAnomaly seeds the placeholder ("Test Name Here")
+    // promising "*Mgr will determine name" -- nothing ever did. The dungeon
+    // row carries the real name; adopt it before the beacon item spawns so
+    // scanner results / overview / observer feeds caption the actual site.
+    if (!dData.name.empty())
+        sig.sigName = dData.name;
+
     if ((sig.sigGroupID == EVEDB::invGroups::Cosmic_Signature) || (sig.sigGroupID == EVEDB::invGroups::Cosmic_Anomaly)) {
         // Create a new anomaly inventory item to track entire dungeon under
         ItemData iData(sig.sigTypeID, sig.ownerID, sig.systemID, flagNone, sig.sigName.c_str(), sig.position/*, info*/);
@@ -313,12 +320,44 @@ bool DungeonMgr::MakeDungeon(CosmicSignature& sig, uint32 dungeonID)
         sig.sigItemID = iRef->itemID();
         sig.bubbleID = cSE->SysBubble()->GetID();
 
+        // VEV_ANOM_WAVES: combat anomalies (type 7) spawn EVE-real escalating
+        // waves from the faction-generic npcSpawnClass ladder instead of the
+        // template's literal rats, so every faction works in tandem. Capture the
+        // pocket bubble now; spawn wave 1 after the (decoration) room loop below.
+        const bool isAnomaly = (sig.dungeonType == Dungeon::Type::Anomaly);
+        SystemBubble* anomBubble = cSE->SysBubble();
+
         _log(COSMIC_MGR__TRACE, "DungeonMgr::Create() - %s using dungeonID %u", sig.sigName.c_str(), dData.dungeonID);
 
         // Create the new live dungeon
         Dungeon::LiveDungeon newDungeon;
         newDungeon.anomalyID = iRef->itemID();
         newDungeon.systemID = iRef->itemID();
+
+        // VEV_XPL_SITE_CONTENT (2026-06-17): a relic/data site must LOOK like a site,
+        // not a lone beacon. Spawn a small cluster of hackable-style containers around
+        // the signature so the client renders a real pocket. The analyze verb still rolls
+        // the loot on the SIG -- these are the visible site, not the loot source. Relic =
+        // ruins + salvage cans; data = databank/tactical cans. groupID 306 (Spawn
+        // Container) renders as a container (3D model / 2D glyph).
+        if (sig.dungeonType == Dungeon::Type::Magnetometric || sig.dungeonType == Dungeon::Type::Radar) {
+            static const uint32 vevRelicCans[4] = { 29214, 29324, 29230, 29445 };
+            static const uint32 vevDataCans[4]  = { 29181, 29182, 29183, 29532 };
+            const uint32* vevCans = (sig.dungeonType == Dungeon::Type::Radar) ? vevDataCans : vevRelicCans;
+            for (int vci = 0; vci < 4; ++vci) {
+                GPoint vcp = sig.position;
+                vcp.x += ((vci % 2) ? 1.0 : -1.0) * (5000.0 + 2500.0 * vci);
+                vcp.z += ((vci < 2) ? 1.0 : -1.0) * (5000.0 + 2000.0 * vci);
+                ItemData vcData(vevCans[vci], sig.ownerID, sig.systemID, flagNone,
+                                sDataMgr.GetTypeName(vevCans[vci]), vcp);
+                iRef = sItemFactory.SpawnItem(vcData);
+                if (iRef.get() == nullptr) continue;
+                iRef->SetCustomInfo(("livedungeon_" + std::to_string(newDungeon.anomalyID)).c_str());
+                iRef->SaveItem();
+                cSE = new CelestialSE(iRef, m_system->GetServiceMgr(), m_system);
+                m_system->AddEntity(cSE, false);
+            }
+        }
 
         // Iterate through rooms and handle item spawning for each room
         uint16 roomCounter = 0;
@@ -349,9 +388,19 @@ bool DungeonMgr::MakeDungeon(CosmicSignature& sig, uint32 dungeonID)
                 Inv::GrpData objGroup;
                 sDataMgr.GetType(object.typeID, objType);
                 sDataMgr.GetGroup(objType.groupID, objGroup);
-                if (objGroup.catID == EVEDB::invCategories::Ship || objGroup.catID == EVEDB::invCategories::Drone) {
-                    m_spawnMgr->DoSpawnForAnomaly(sBubbleMgr.FindBubble(m_system->GetID(), pos), pos, GetRandLevel(), object.typeID);
-                } 
+                // VEV_RAT_CATEGORY: real NPC rats are category Entity(11)
+                // (Sansha frigate groups etc.), NOT Ship/Drone -- an authored
+                // combat JSON spawned its rats as inert celestials. Group 306
+                // (Spawn Container) stays a celestial.
+                if (objGroup.catID == EVEDB::invCategories::Ship
+                    || objGroup.catID == EVEDB::invCategories::Drone
+                    || (objGroup.catID == EVEDB::invCategories::Entity
+                        && objType.groupID != 306)) {
+                    // VEV_ANOM_WAVES: skip the template's literal rats for combat
+                    // anomalies -- they spawn as EVE-real waves after this loop.
+                    if (!isAnomaly)
+                        m_spawnMgr->DoSpawnForAnomaly(sBubbleMgr.FindBubble(m_system->GetID(), pos), pos, GetRandLevel(), object.typeID);
+                }
                 
                 // Otherwise, spawn as a normal celestial object
                 else {
@@ -377,10 +426,27 @@ bool DungeonMgr::MakeDungeon(CosmicSignature& sig, uint32 dungeonID)
             roomCounter++;
         }
 
+        // VEV_ANOM_WAVES: pocket + decorations exist -> spawn the first EVE-real
+        // wave for this anomaly's faction (sig.ownerID); SpawnKilled chains the rest.
+        if (isAnomaly && (anomBubble != nullptr))
+            m_spawnMgr->SpawnInitialAnomalyWave(anomBubble, sig.ownerID);
+
         // Finally add the new dungeon to the system-wide list for tracking
         m_dungeonList.insert({newDungeon.anomalyID, newDungeon});
     }
-    return false;
+    // VEV_MAKEDUNGEON_RET: the fall-through returned false even on SUCCESS,
+    // so CreateAnomaly aborted every sig before registration -- anomalies
+    // could never become scannable (found 2026-06-12).
+    return true;
+}
+
+// VEV_ANOM_WAVES: SpawnMgr -> DungeonMgr -> AnomalyMgr regen signal. When the
+// last wave of an anomaly is cleared, ask AnomalyMgr to de-list the spent site
+// and queue a replacement so the system stays farmable (EVE-real respawn).
+void DungeonMgr::NotifyAnomalyCleared(uint16 bubbleID)
+{
+    if (m_anomMgr != nullptr)
+        m_anomMgr->OnAnomalyCleared(bubbleID);
 }
 
 int8 DungeonMgr::GetFaction(uint32 factionID)

@@ -76,6 +76,7 @@ const char* kindForEntity(SystemEntity* se) {
             const uint16 grp = self->groupID();
             if (grp == 502) return "site";        // Cosmic Signature beacon
             if (grp == 226) return "structure";   // Large Collidable Object (ruins)
+            if (grp == 306) return "container";   // Spawn Container (relic/data site cans)
         }
     }
     return nullptr;
@@ -375,15 +376,12 @@ void StreamGridsTick() {
                 // mining) so every 2D client draws this ship's tracers/beams.
                 {
                     const uint32_t sidW = static_cast<uint32_t>(se->GetID());
-                    if (se->IsAIShipSE())
-                        sLog.Warning("VEV_WF_DIAG", "STREAM se=%u wHas=%d eHas=%d", sidW, (int)recentWeaponFire().count(sidW), (int)recentEwarFire().count(sidW));
                     auto itW = recentWeaponFire().find(sidW);
                     if (itW != recentWeaponFire().end()) {
                         if (itW->second.expiry >= t) {
                             e.weaponTargetId = std::to_string(itW->second.targetID);
                             e.weaponTypeId   = itW->second.typeID;
                             e.weaponGroupId  = itW->second.groupID;
-                            if (se->IsAIShipSE()) sLog.Warning("VEV_WF_DIAG", "SET weapon se=%u grp=%u", sidW, itW->second.groupID);
                         } else recentWeaponFire().erase(itW);
                     }
                     auto itE = recentEwarFire().find(sidW);
@@ -392,7 +390,6 @@ void StreamGridsTick() {
                             e.ewarTargetId = std::to_string(itE->second.targetID);
                             e.ewarTypeId   = itE->second.typeID;
                             e.ewarGroupId  = itE->second.groupID;
-                            if (se->IsAIShipSE()) sLog.Warning("VEV_WF_DIAG", "SET ewar se=%u grp=%u", sidW, itE->second.groupID);
                         } else recentEwarFire().erase(itE);
                     }
                 }
@@ -525,7 +522,6 @@ void NoteWeaponFire(uint32_t shipID, uint32_t targetID, uint32_t weaponTypeID, u
     // the target painter laser, no gun fire"). The 2D client reads both streams
     // and renders both -- guns AND web AND painter.
     RecentFire rec = { targetID, weaponTypeID, weaponGroupID, nowMs() + kWeaponFireWindowMs };
-    sLog.Warning("VEV_WF_DIAG", "NOTE ship=%u grp=%u %s", shipID, weaponGroupID, isUtilityFireGroup(weaponGroupID) ? "EWAR" : "WEAPON");
     if (isUtilityFireGroup(weaponGroupID)) recentEwarFire()[shipID] = rec;
     else                                   recentWeaponFire()[shipID] = rec;
 }
