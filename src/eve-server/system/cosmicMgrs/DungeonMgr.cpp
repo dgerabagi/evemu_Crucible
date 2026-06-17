@@ -341,8 +341,12 @@ bool DungeonMgr::MakeDungeon(CosmicSignature& sig, uint32 dungeonID)
         // ruins + salvage cans; data = databank/tactical cans. groupID 306 (Spawn
         // Container) renders as a container (3D model / 2D glyph).
         if (sig.dungeonType == Dungeon::Type::Magnetometric || sig.dungeonType == Dungeon::Type::Radar) {
-            static const uint32 vevRelicCans[4] = { 29214, 29324, 29230, 29445 };
-            static const uint32 vevDataCans[4]  = { 29181, 29182, 29183, 29532 };
+            // SAFE cargo-container types only (radius-14 "Cargo Container - X").
+            // The structure-NAMED Spawn Containers (29214 Quarantine Station Ruins,
+            // 29532 Cartographer's Quarters) load as a StructureSE -> Init invalid ->
+            // bad_alloc crash (overnight 2026-06-17). These never do.
+            static const uint32 vevRelicCans[4] = { 29324, 29230, 29445, 29181 };
+            static const uint32 vevDataCans[4]  = { 29182, 29183, 29184, 29230 };
             const uint32* vevCans = (sig.dungeonType == Dungeon::Type::Radar) ? vevDataCans : vevRelicCans;
             for (int vci = 0; vci < 4; ++vci) {
                 GPoint vcp = sig.position;
