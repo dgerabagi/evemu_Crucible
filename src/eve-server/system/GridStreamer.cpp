@@ -105,6 +105,14 @@ std::unordered_map<uint32_t, RecentFire>& recentWeaponFire() {
 }
 constexpr int64_t kWeaponFireWindowMs = 8000;  // a few weapon cycles; refreshed per shot
 
+// VEV_EWAR_FIRE: SEPARATE per-ship slot for EWAR/utility beams (web/painter/scram
+// /reps) so they never compete with weapon tracers for one field (curator 2026-
+// 06-16). Twin of recentWeaponFire; NoteWeaponFire routes by the module group id.
+std::unordered_map<uint32_t, RecentFire>& recentEwarFire() {
+    static std::unordered_map<uint32_t, RecentFire> m;
+    return m;
+}
+
 // VEV_REANCHOR_LOGIC: nearest anchorable celestial (station/gate/planet/moon)
 // to a 2D point, scanning the system's live entity map (already main-thread-
 // owned). Out-params get the winner; returns false if no celestial. Belts are
@@ -125,7 +133,7 @@ double warpInRadius2D(SystemEntity* se) {
         return r * (s + 1.0) + 1.0e6;
     }
     if (se->IsBeltSE()) return (r > 100000.0 ? r : 100000.0);  // VEV: belt grid spans the ~100km roid field, not the belt-centre radius
-    if (se->GetGroupID() == 885) return 100000.0;  // VEV_ANCHOR_ANOMALY: site pocket spans rooms + warp drop
+    if (se->GetGroupID() == 885 || se->GetGroupID() == 502) return 100000.0;  // VEV_ANCHOR_ANOMALY + VEV_ANCHOR_SIG (502 relic/data): site pocket spans rooms + warp drop
     return r;
 }
 
@@ -138,7 +146,12 @@ bool nearestAnchor(SystemManager* sm, const GPoint& from,
         // warp destinations for the explore career — without them as anchor
         // candidates, an observer/member warping to a site never re-anchored
         // (the stuck-at-station CCTV, curator-observed 2026-06-12).
-        const bool vevAnomaly = (se->GetGroupID() == 885);
+        // VEV_ANCHOR_SIG (2026-06-16): relic/data Cosmic Signature beacons (group
+        // 502) are warp destinations too. Group 885 made combat anomalies anchor,
+        // but a relic/data explorer warping to a 502 sig never re-anchored -> the
+        // pinned CCTV stayed on a distant celestial and showed an empty grid
+        // ("I check Pathfinder and see nothing", curator 2026-06-16).
+        const bool vevAnomaly = (se->GetGroupID() == 885 || se->GetGroupID() == 502);
         if (!(se->IsStationSE() || se->IsGateSE() || se->IsPlanetSE()
               || se->IsMoonSE() || se->IsBeltSE() || vevAnomaly)) continue;  // VEV: belts are warp anchors -> their grid carries the roids + ships parked there
         const GPoint& p = se->GetPosition();
@@ -224,7 +237,15 @@ void StreamGridsTick() {
         snap.serverTimeMs = t;
         snap.tick         = ++tickCounters()[gridKey(sub.grid)];
         snap.anchorName   = sub.anchorName;
-        snap.anchorPos    = sub.anchorPos;   // TRUE anchor system pos for the client
+        // VEV_ANCHOR_SELF: for a moving ship-anchor (the deep-void self-anchor) project
+        // against the LIVE ship position so the pilot stays centred as it cruises; for a
+        // static celestial this equals sub.anchorPos (it does not move).
+        Vec2 originPos = sub.anchorPos;
+        if (anchorSE != nullptr && (anchorSE->IsAIShipSE() || anchorSE->IsShipSE())) {
+            const GPoint& vevAp = anchorSE->GetPosition();
+            originPos = { vevAp.x, vevAp.z };
+        }
+        snap.anchorPos    = originPos;   // TRUE anchor system pos for the client
 
         // GetEntities() returns a COPY of the system's entity map; safe to walk
         // on the main thread (we own the world here).
@@ -240,8 +261,8 @@ void StreamGridsTick() {
             // Project 3D→2D, grid-local (origin = the grid anchor): drop Y,
             // subtract the anchor's system position from x/z.
             const GPoint& p = se->GetPosition();
-            const double localX = p.x - sub.anchorPos.x;
-            const double localZ = p.z - sub.anchorPos.z;
+            const double localX = p.x - originPos.x;
+            const double localZ = p.z - originPos.z;
 
             // Off-grid filter: skip anything beyond the 250km bubble (you'd
             // warp to it). The anchor itself sits at (0,0) → always included.
@@ -279,7 +300,10 @@ void StreamGridsTick() {
                 // VEV_MINING_WARP_CLEAR: entering warp drops all active modules
                 // (EVE) -- wipe the recent-mining beam so it doesn't linger in/after warp.
                 if (dm != nullptr && dm->IsWarping()) recentMining().erase((uint32_t)se->GetID());
-                if (dm != nullptr && dm->IsWarping()) recentWeaponFire().erase((uint32_t)se->GetID());
+                // VEV_WF: do NOT force-erase weapon/ewar fire on warp — IsWarping()
+                // mis-reports on a just-warped phantom mid-combat and wiped every shot
+                // before it streamed (curator 5x). Let the ~8s expiry clear it.
+                // (was: if (IsWarping) recentWeaponFire().erase(...))
                 // VEV_LOCKED_TARGETS: server-confirmed locks for the 2D target cards.
                 if (se->TargetMgr() != nullptr) {
                     PyList* tl = se->TargetMgr()->GetTargets();
@@ -351,13 +375,25 @@ void StreamGridsTick() {
                 // mining) so every 2D client draws this ship's tracers/beams.
                 {
                     const uint32_t sidW = static_cast<uint32_t>(se->GetID());
+                    if (se->IsAIShipSE())
+                        sLog.Warning("VEV_WF_DIAG", "STREAM se=%u wHas=%d eHas=%d", sidW, (int)recentWeaponFire().count(sidW), (int)recentEwarFire().count(sidW));
                     auto itW = recentWeaponFire().find(sidW);
                     if (itW != recentWeaponFire().end()) {
                         if (itW->second.expiry >= t) {
                             e.weaponTargetId = std::to_string(itW->second.targetID);
                             e.weaponTypeId   = itW->second.typeID;
                             e.weaponGroupId  = itW->second.groupID;
+                            if (se->IsAIShipSE()) sLog.Warning("VEV_WF_DIAG", "SET weapon se=%u grp=%u", sidW, itW->second.groupID);
                         } else recentWeaponFire().erase(itW);
+                    }
+                    auto itE = recentEwarFire().find(sidW);
+                    if (itE != recentEwarFire().end()) {
+                        if (itE->second.expiry >= t) {
+                            e.ewarTargetId = std::to_string(itE->second.targetID);
+                            e.ewarTypeId   = itE->second.typeID;
+                            e.ewarGroupId  = itE->second.groupID;
+                            if (se->IsAIShipSE()) sLog.Warning("VEV_WF_DIAG", "SET ewar se=%u grp=%u", sidW, itE->second.groupID);
+                        } else recentEwarFire().erase(itE);
                     }
                 }
             }
@@ -427,12 +463,27 @@ void StreamGridsTick() {
             const GPoint shipPos = ship->GetPosition();
             uint32_t nId = 0; Vec2 nPos; std::string nName; double nWarpR = 0.0;
             if (!nearestAnchor(shipSm, shipPos, nId, nPos, nName, nWarpR)) continue;
+            // Is the nearest celestial/beacon within its warp-in bubble? (Checked BEFORE
+            // gridChanged so a pilot drifting OFF its current anchor's bubble -- which
+            // keeps the same nearest celestial, so gridChanged would be false -- still
+            // re-anchors instead of stranding invisible on a stale grid.)
+            const double rdx = nPos.x - shipPos.x, rdz = nPos.z - shipPos.z;
+            const double arriveSq = (nWarpR + kGridRadiusM) * (nWarpR + kGridRadiusM);
+            if (rdx * rdx + rdz * rdz > arriveSq) {
+                // VEV_ANCHOR_SELF (2026-06-16): off-bubble from EVERY celestial/beacon =
+                // the pilot is in the deep-space void (scanning between sites, drifting
+                // post-warp). Don't strand the pinned CCTV on a stale distant celestial
+                // (curator: "I check Pathfinder and see nothing") -- anchor the grid on
+                // the SHIP ITSELF so the observed pilot is always centred + visible. The
+                // projection below uses the live ship position for ship-anchored grids.
+                nId = ship->GetID();
+                nPos = { shipPos.x, shipPos.z };
+                nWarpR = kGridRadiusM;
+                nName = ship->GetName() ? ship->GetName() : "";
+            }
             const bool gridChanged =
                 (liveSys != sub.grid.solarSystemID) || (nId != sub.grid.anchorId);
             if (!gridChanged) continue;
-            const double rdx = nPos.x - shipPos.x, rdz = nPos.z - shipPos.z;
-            const double arriveSq = (nWarpR + kGridRadiusM) * (nWarpR + kGridRadiusM);
-            if (rdx * rdx + rdz * rdz > arriveSq) continue;   // VEV_RADIUS_BUBBLE: arrived
             const GridId oldGrid = sub.grid;
             const GridId newGrid{ liveSys, nId };
             const Vec2 newPos = nPos;
@@ -448,8 +499,35 @@ void NoteMining(uint32_t shipID, uint32_t targetID) {
     recentMining()[shipID] = { targetID, nowMs() + kMiningBeamWindowMs };
 }
 
+// Module groups that are UTILITY/EWAR (web/scram/ECM/painter + remote reps/energy
+// transfer). They call NoteWeaponFire to draw their own beam, but the per-ship
+// fire record has ONE slot, so every cycle they CLOBBERED a real weapon's tracer
+// (curator 2026-06-16: "I only see the target painter laser, no gun fire"). A
+// utility note must NOT overwrite a still-live WEAPON note -- the gun tracers win.
+static inline bool isUtilityFireGroup(uint32_t g) {
+    switch (g) {
+        case 52:   // Warp Scrambler
+        case 65:   // Stasis Web
+        case 201:  // ECM
+        case 379:  // Target Painter
+        case 41:   // Shield Transfer (remote)
+        case 325:  // Remote Armor Repairer
+        case 67:   // Energy Transfer
+        case 68:   // Remote Hull Repairer
+            return true;
+        default: return false;   // turrets (53/55/74) + launchers + rat shots (0) = weapon
+    }
+}
+
 void NoteWeaponFire(uint32_t shipID, uint32_t targetID, uint32_t weaponTypeID, uint32_t weaponGroupID) {
-    recentWeaponFire()[shipID] = { targetID, weaponTypeID, weaponGroupID, nowMs() + kWeaponFireWindowMs };
+    // Route to SEPARATE per-ship slots so weapon TRACERS and EWAR/utility BEAMS
+    // never compete for one field (curator 2026-06-16, reported 4x: "I only see
+    // the target painter laser, no gun fire"). The 2D client reads both streams
+    // and renders both -- guns AND web AND painter.
+    RecentFire rec = { targetID, weaponTypeID, weaponGroupID, nowMs() + kWeaponFireWindowMs };
+    sLog.Warning("VEV_WF_DIAG", "NOTE ship=%u grp=%u %s", shipID, weaponGroupID, isUtilityFireGroup(weaponGroupID) ? "EWAR" : "WEAPON");
+    if (isUtilityFireGroup(weaponGroupID)) recentEwarFire()[shipID] = rec;
+    else                                   recentWeaponFire()[shipID] = rec;
 }
 
 // VEV_SIM_PAINTER registry (targetID -> {sigMult, expiry}).
