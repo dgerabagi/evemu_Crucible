@@ -5317,10 +5317,28 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         uint32 coID=0;
         { DBQueryResult cr; DBResultRow crow; if (sDatabase.RunQuery(cr, "SELECT e.itemID FROM entity e JOIN invTypes t ON t.typeID=e.typeID WHERE t.groupID=1025 AND e.customInfo='%u' LIMIT 1", planetID) && cr.GetRow(crow)) coID = crow.GetUInt(0); }
         if(coID==0){resultMsg="pi_deposit_customs: customs office id not found";return false;}
+        // VEV_POCO3 (de-fake R2b): from_cargo:1 = CONSUME the item from the pilot's
+        // active-ship cargo (a REAL delivery — a hauler flew it here), failing if it's
+        // not aboard (no silent spawn — a failed delivery must surface). Default (no
+        // from_cargo) keeps the spawn/seed path so CEO self-serve + bootstrap still work.
+        uint32 fromCargo = rdU("\"from_cargo\"");
+        if (fromCargo) {
+            uint32 shipID=0;
+            { DBQueryResult sr; DBResultRow srow; if (sDatabase.RunQuery(sr,"SELECT shipID FROM chrCharacters WHERE characterID=%u",charID) && sr.GetRow(srow)) shipID=srow.GetUInt(0); }
+            uint32 cargoItem=0;
+            { DBQueryResult ir; DBResultRow irow; if (sDatabase.RunQuery(ir,"SELECT itemID FROM entity WHERE ownerID=%u AND typeID=%u AND locationID=%u AND flag=%d LIMIT 1",charID,typeID,shipID,(int)flagCargoHold) && ir.GetRow(irow)) cargoItem=irow.GetUInt(0); }
+            if (cargoItem==0){resultMsg="pi_deposit_customs: that item is not in your ship cargo (fly it here first)";return false;}
+            InventoryItemRef cRef=sItemFactory.GetItemRef(cargoItem);
+            if (cRef.get()==nullptr){resultMsg="pi_deposit_customs: cargo item not loaded";return false;}
+            cRef->Move(coID, flagHangar, true);
+            cRef->SaveItem();
+            char buf2[140]; snprintf(buf2,sizeof(buf2),"delivered item %u (type %u) from cargo into customs office %u", cargoItem, typeID, coID);
+            resultMsg=buf2; return true;
+        }
         ItemData idata(typeID, charID, coID, flagHangar, qty);
         InventoryItemRef iRef = sItemFactory.SpawnItem(idata);
         if (iRef.get()==nullptr){resultMsg="pi_deposit_customs: spawn failed";return false;}
-        char buf[128]; snprintf(buf,sizeof(buf),"deposited %u x type %u into customs office %u", qty, typeID, coID);
+        char buf[128]; snprintf(buf,sizeof(buf),"deposited %u x type %u into customs office %u (seeded)", qty, typeID, coID);
         resultMsg=buf; return true;
     }
     // ── VEV_POS0: deploy + online a control tower at a moon (headless).
@@ -5635,6 +5653,26 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         char buf[96]; snprintf(buf,sizeof(buf),"forced %u production cycle(s)", cycles);
         resultMsg=buf; return true;
     }
+    // VEV_PI_REARM: renew expired ECU extraction programs on an existing colony so it
+    // keeps producing (EVE programs expire). The Logistics director calls this on a
+    // schedule — production sustains without re-committing the colony. {systemID,planetID,cycles?}
+    if (cmd == "pi_rearm") {
+        std::string p(params);
+        auto rdU = [&p](const char* k) -> uint32 { size_t kp=p.find(k); if(kp==std::string::npos) return 0; size_t c=p.find(":",kp); return (c==std::string::npos)?0:(uint32)atol(p.c_str()+c+1); };
+        uint32 systemID=rdU("\"systemID\""), planetID=rdU("\"planetID\""), cycles=rdU("\"cycles\"");
+        if (systemID==0||planetID==0) { resultMsg="pi_rearm needs systemID, planetID"; return false; }
+        SystemManager* pSM=FindOrBootSystem(systemID);
+        if(!pSM){resultMsg="pi_rearm: system not found";return false;}
+        SystemEntity* pSE=pSM->GetSE(planetID);
+        if(!pSE){resultMsg="pi_rearm: planet not instantiated";return false;}
+        PlanetSE* pPlanet=pSE->GetPlanetSE();
+        if(!pPlanet){resultMsg="pi_rearm: not a planet";return false;}
+        Colony* colony=pPlanet->GetColony(charID);
+        if(!colony->HasColony()){resultMsg="pi_rearm: no colony here";return false;}
+        int n=colony->RearmECUs((int)cycles);
+        char buf[96]; snprintf(buf,sizeof(buf),"re-armed %d ECU program(s)", n);
+        resultMsg=buf; return n>0;
+    }
     if (cmd == "stack_op") {
         // VEV_STACK_OP: inventory stack management for the 2D client (split a
         // stack / merge two stacks of the same type). Runs on the main thread via
@@ -5901,7 +5939,14 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                                            pAIShip->SystemMgr(), fdata);
         cSE->Init();
         canRef->SetMySE(cSE);
-        canRef->SetAnchor(true);
+        // VEV_FIX_JETCAN_ANCHOR (2026-06-19): a jettisoned cargo container must NOT
+        // be anchored. Anchoring (SetAnchor(true)) makes ContainerSE skip the
+        // empty-can delete (Container.cpp:177-178) AND signals a deployable, so the
+        // AI-jettison path littered Deepari with 116 cans that never cleared. The
+        // native client path (ShipService.cpp jetcan branch) leaves it unanchored;
+        // match it so the WorldDecay timer (Container.cpp:270, ~2h) + empty-can GC
+        // both reclaim AI jetcans. Curator rebuild required to deploy.
+        canRef->SetAnchor(false);
         pAIShip->SystemMgr()->AddEntity(cSE);
         pAIShip->DestinyMgr()->SendJettisonPacket();
         if (!canRef->GetMyInventory()->HasAvailableSpace(flagNone, iRef)) {
@@ -7077,11 +7122,12 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             resultMsg = hbuf2;
             return false;
         }
-        // VEV_HACK_SKILL_MATH (2026-06-16): success scales with the pilot's relevant
-        // hacking skill vs site difficulty -- not a flat roll. Data (Radar) keys off
-        // Hacking (21718); relic (Magnetometric) off Archaeology (13278) -- EVE's real
-        // virus-coherence skills. Read the trained level from entity/entity_attributes
-        // (flag=7 skill, attr 280=level) so it works for offline phantoms (mirrors get_skills).
+        // VEV_HACK_PROSPECTOR (2026-06-19): 1:1 evemu Crucible roll = Prospector::CheckSuccess
+        // (ship/modules/Prospector.cpp:143) -> rand(0,100) < AccessDifficulty(901) +
+        // AccessDifficultyBonus(902). NO node/core minigame (that is Odyssey 2013, 8y newer).
+        // The hacking skill is wired into the bonus "for fidelity" per docs/exploration-design.md
+        // C3 (base evemu leaves Archaeology(13278)/Hacking(21718) unwired). Read the trained
+        // level from entity/entity_attributes (flag=7, attr 280) -- works for offline phantoms.
         const uint32 vevHackSkill = (sigHit.dungeonType == 4) ? 21718 : 13278;
         int vevSkillLvl = 0;
         {
@@ -7094,13 +7140,14 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                 if (sres.GetRow(srow) && !srow.IsNull(0)) vevSkillLvl = srow.GetInt(0);
             }
         }
-        int hbonus = modRef->HasAttribute(AttrAccessDifficultyBonus) ? modRef->GetAttribute(AttrAccessDifficultyBonus).get_int() : 5;
-        // base 45 + 8/skill-level (0..40) + module bonus - site difficulty (relic runs
-        // a tougher virus than data). Skill-0 pilot ~38-44%; maxed + good module ~95%.
-        const int vevDiff = (sigHit.dungeonType == 3) ? 12 : 6;
-        int hchance = 45 + vevSkillLvl * 8 + hbonus - vevDiff;
+        const int hbonus = modRef->HasAttribute(AttrAccessDifficultyBonus)
+                         ? modRef->GetAttribute(AttrAccessDifficultyBonus).get_int() : 5;   // attr 902
+        // site AccessDifficulty (901): relic (Magnetometric) tougher than data (Radar);
+        // real cans span -10..30, we use a hackable positive base. +3%/trained skill level.
+        const int vevAccessDifficulty = (sigHit.dungeonType == 3) ? 25 : 30;
+        int hchance = vevAccessDifficulty + hbonus + vevSkillLvl * 3;
         if (hchance > 95) hchance = 95;
-        if (hchance < 15) hchance = 15;
+        if (hchance < 5)  hchance = 5;
         if (!vevForce && MakeRandomInt(0, 100) >= hchance) {
             char hfail[128];
             snprintf(hfail, sizeof(hfail), "hack failed (%d%% chance) - cycle again", hchance);

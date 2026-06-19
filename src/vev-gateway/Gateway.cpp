@@ -348,10 +348,11 @@ static json handleWarpToSignature(const json& payload) {
     return json{{"ok", ok}, {"queued", ok}};
 }
 
-// analyze — commit a hack the human already won in the client minigame. We resolve the
-// player's fitted Codebreaker/Analyzer (Data Miners, groupID 538) and pass force=true so
-// the engine skips its own skill roll: the minigame WAS the skill check ("fake the
-// minigame, not the grid"). The engine drops real loot to cargo + consumes the site.
+// analyze -- run ONE Crucible analyzer cycle for the human. Resolve the player's fitted
+// Codebreaker/Analyzer (Data Miners, groupID 538) and run the SAME skill-based % roll the
+// AI pilots get -- NO force, NO minigame (pre-Odyssey hacking was a passive module cycle:
+// a % chance every ~5s to crack the can). A winning roll drops real loot + consumes the
+// site; a miss returns "cycle again" and the client re-cycles every 5s.
 static json handleAnalyze(const json& payload) {
     if (!payload.is_object() || !payload.contains("characterID") || !payload.contains("sigID"))
         throw std::runtime_error("payload requires { characterID, sigID }");
@@ -367,7 +368,7 @@ static json handleAnalyze(const json& payload) {
     }
     if (moduleID == 0)
         return json{{"ok", false}, {"raw", "no Data/Relic Analyzer fitted"}};
-    json ap = json{{"sigID", sigID}, {"moduleID", moduleID}, {"force", true}};
+    json ap = json{{"sigID", sigID}, {"moduleID", moduleID}};
     uint32_t rid = enqueueAICommandLID(characterID, "analyze", ap.dump());
     bool ok = false;
     std::string raw = pollAIResult(rid, 5000, &ok);
@@ -6546,6 +6547,24 @@ static json handleGetColony(const json& payload) {
 // Bridge a build command to the proven pi_* queue verbs. Fire-and-enqueue; the
 // client refetches getColony to observe the result (real pin ids, etc.).
 static uint32_t vevAllocateColonyOwner(uint32_t corpID, uint32_t requesterID);  // VEV_PI_CORP fwd decl
+
+static bool vevEstablishViaCustoms(uint32_t owner, uint32_t systemID, uint32_t planetID, const std::string& specJson) {
+    // VEV_POCO2 (de-fake R2): establish a corp colony the real EVE way — through the
+    // planet's customs office, not a surface spawn-teleport. Ensure a POCO, deliver the
+    // Command Center into it, then commit consuming it (fromCustoms). R2b replaces the
+    // deposit with a real Primae flight depositing the CC from cargo.
+    uint32_t ccTypeID = 0;
+    std::string spec = specJson;
+    try { json s = json::parse(specJson); if (s.contains("cc")) ccTypeID = s["cc"].value("typeID", 0u); s["fromCustoms"] = 1; spec = s.dump(); }
+    catch (...) {}
+    char j[192];
+    snprintf(j, sizeof(j), "{\"systemID\":%u,\"planetID\":%u}", systemID, planetID);
+    enqueueAICommand(owner, "pi_spawn_customs", j);
+    if (ccTypeID) { snprintf(j, sizeof(j), "{\"systemID\":%u,\"planetID\":%u,\"typeID\":%u,\"qty\":1}", systemID, planetID, ccTypeID);
+                    enqueueAICommand(owner, "pi_deposit_customs", j); }
+    return enqueueAICommand(owner, "pi_commit_spec", spec);
+}
+
 static json handleColonyCmd(const json& payload) {
     if (!payload.is_object() || !payload.contains("characterID") || !payload.contains("planetID") || !payload.contains("op"))
         throw std::runtime_error("payload requires { characterID, planetID, op }");
@@ -6639,7 +6658,7 @@ static json handleColonyCmd(const json& payload) {
             DBerror e2; sDatabase.RunQuery(e2, "UPDATE vevColonySpec SET status='dispatched',ownerID=%u WHERE specID=%u", owner, specID);
             return json{{"dispatched", true}, {"op", op}, {"assignedTo", owner}, {"specID", specID}};
         }
-        bool ok = enqueueAICommand(owner, "pi_commit_spec", specJson);
+        bool ok = vevEstablishViaCustoms(owner, systemID, planetID, specJson);   // VEV_POCO2
         DBerror e2; sDatabase.RunQuery(e2, "UPDATE vevColonySpec SET status='committed',ownerID=%u WHERE specID=%u", owner, specID);
         return json{{"committed", ok}, {"op", op}, {"assignedTo", owner}, {"specID", specID}};
     } else if (op == "fulfill_provision") {
@@ -6656,7 +6675,7 @@ static json handleColonyCmd(const json& payload) {
         if (!(sDatabase.RunQuery(sr, "SELECT specJson FROM vevColonySpec WHERE specID=%u", specID) && sr.GetRow(srow2)))
             throw std::runtime_error("spec not found");
         std::string specJson = srow2.GetText(0) ? srow2.GetText(0) : "";
-        bool ok = enqueueAICommand(owner, "pi_commit_spec", specJson);
+        bool ok = vevEstablishViaCustoms(owner, systemID, planetID, specJson);   // VEV_POCO2
         DBerror e1; sDatabase.RunQuery(e1, "UPDATE vevLogiJobs SET status='done' WHERE jobID=%u", jobID);
         DBerror e2; sDatabase.RunQuery(e2, "UPDATE vevColonySpec SET status='committed' WHERE specID=%u", specID);
         return json{{"committed", ok}, {"op", op}, {"jobID", jobID}, {"assignedTo", owner}};

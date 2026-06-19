@@ -11,6 +11,7 @@
 
 
 #include "eve-server.h"
+#include "EntityList.h"   // VEV_ANOM_AI_GATE (sEntityList.HasAIShipInSystem)
 
 #include "EVEServerConfig.h"
 
@@ -146,6 +147,14 @@ bool AnomalyMgr::Init(BeltMgr* beltMgr, DungeonMgr* dungMgr, SpawnMgr* spawnMgr)
     for (int i = 0; i < (m_maxSigs / 2); i++) {
         m_typeList.push_back(Dungeon::Type::Anomaly);
     }
+    // VEV_XPL_CONTENT: evemu's random GetDungeonType under-produces relic/data
+    // (Magnetometric/Radar), leaving explorers with nothing to hack. Force a
+    // baseline of relic + data signatures per system so the scan->hack->loot
+    // loop always has non-combat exploration content.
+    for (int i = 0; i < 2; i++) {
+        m_typeList.push_back(Dungeon::Type::Magnetometric); // relic
+        m_typeList.push_back(Dungeon::Type::Radar);         // data
+    }
 
     // these use config option to (en/dis)able individual types
     m_Grav = sConfig.exploring.Gravametric;
@@ -164,12 +173,55 @@ bool AnomalyMgr::Init(BeltMgr* beltMgr, DungeonMgr* dungMgr, SpawnMgr* spawnMgr)
     return (m_initalized = true);
 }
 
+// VEV_ANOM_REGEN: delay before a completed combat anomaly respawns a fresh site
+// (EVE-real: a cleared site is replaced a few minutes later -> endless ratting).
+static const int64_t ANOMALY_RESPAWN_DELAY_S = 300;
+
 void AnomalyMgr::Process() {
     if (!m_initalized)
         return;
+    // VEV_ANOM_REGEN: mature any delayed respawns whose timer has elapsed -> queue
+    // them onto m_typeList so the proc-timer drain below recreates a fresh anomaly
+    // (EVE-real ~5 min after a site was completed). Removed-once-queued = no dups.
+    if (!m_pendingRespawns.empty()) {
+        int64_t now = sEntityList.GetStamp();
+        for (auto it = m_pendingRespawns.begin(); it != m_pendingRespawns.end(); ) {
+            if (now >= *it) {
+                m_typeList.push_back(Dungeon::Type::Anomaly);
+                it = m_pendingRespawns.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     if (m_procTimer.Check(/*!sConfig.debug.IsTestServer*/)) {
         // Only generate new signals when a player is in the system
-        if (m_system->PlayerCount() > 0 && m_typeList.size () > 0) {
+        // VEV_ANOM_AI_GATE: ... or an engine-driven AI pilot (phantoms never
+        // bump PlayerCount, so AI-only systems had zero signals forever).
+        const bool vevPilotHere = (m_system->PlayerCount() > 0
+             || sEntityList.HasAIShipInSystem(m_system->GetID()));
+        // VEV_XPL_SIG_REGEN: keep a visited system stocked with ~1 relic + ~1 data
+        // cosmic signature. Relic/data sigs spawn ONCE then never regenerate (the
+        // long-standing expiry/regen TODO), so the AI explorer roaming a constellation
+        // permanently stripped every system -> a human warping in found nothing to
+        // scan. Top up any exploration type whose live + already-queued count is below
+        // target; CreateAnomaly picks a fresh position each time, so this both HEALS an
+        // already-stripped system (on the next visit) and replenishes after a hack.
+        // Combat anomalies (Dungeon::Type::Anomaly) keep their own delayed respawn.
+        if (vevPilotHere) {
+            int vevRelic = 0, vevData = 0;
+            for (auto& kv : m_sigByItemID) {
+                if (kv.second.dungeonType == Dungeon::Type::Magnetometric) ++vevRelic;
+                else if (kv.second.dungeonType == Dungeon::Type::Radar) ++vevData;
+            }
+            for (uint8 t : m_typeList) {
+                if (t == Dungeon::Type::Magnetometric) ++vevRelic;
+                else if (t == Dungeon::Type::Radar) ++vevData;
+            }
+            if (vevRelic < 1) m_typeList.push_back(Dungeon::Type::Magnetometric);
+            if (vevData  < 1) m_typeList.push_back(Dungeon::Type::Radar);
+        }
+        if (vevPilotHere && m_typeList.size () > 0) {
             auto cur = m_typeList.begin();
             auto end = m_typeList.end();
 
@@ -321,12 +373,14 @@ void AnomalyMgr::CreateAnomaly(int8 typeID)
             sig.sigGroupID = EVEDB::invGroups::Cosmic_Signature;
             sig.scanGroupID = Scanning::Group::Signature;
             sig.scanAttributeID = AttrScanMagnetometricStrength;
+            sig.sigName = "Ruined Relic Site"; // VEV_XPL_CONTENT
         } break;
         case Dungeon::Type::Radar: {       // 4,
             sig.sigTypeID = EVEDB::invTypes::DeadspaceSignature;
             sig.sigGroupID = EVEDB::invGroups::Cosmic_Signature;
             sig.scanGroupID = Scanning::Group::Signature;
             sig.scanAttributeID = AttrScanRadarStrength;
+            sig.sigName = "Unsecured Data Site"; // VEV_XPL_CONTENT
         } break;
         case Dungeon::Type::Ladar: {       // 5,
             sig.sigTypeID = EVEDB::invTypes::DeadspaceSignature;
@@ -347,9 +401,13 @@ void AnomalyMgr::CreateAnomaly(int8 typeID)
             if (sig.sigItemID) {
                 m_sigBySigID.emplace(sig.sigID, sig);
                 m_sigByItemID.emplace(sig.sigItemID, sig);
+                // VEV_ANOMALY_HYGIENE (Phase A): persist ONLY a wormhole WHMgr
+                // actually created. The old unconditional SaveAnomaly saved every
+                // FAILED creation (sigItemID==0, name "Test Name Here") -> 447 junk
+                // rows accreted across 47 systems, reloaded as phantom signatures
+                // each restart. No itemID == nothing to persist.
+                SaveAnomaly(sig);
             }
-            // Save wormhole to the database for later loading
-            SaveAnomaly(sig);
             return;
         } break;
         case Dungeon::Type::Anomaly: {      // 7   simple combat sites
@@ -577,12 +635,15 @@ void AnomalyMgr::AddSignal(SystemEntity* pSE, uint32 id/*0*/)
         case EVEDB::invCategories::Entity:
         case EVEDB::invCategories::Celestial:       //wrecks
         default:  {
-            sig.sigTypeID = EVEDB::invTypes::CosmicAnomaly;
-            sig.sigGroupID = EVEDB::invGroups::Cosmic_Anomaly;
-            sig.scanGroupID = Scanning::Group::Anomaly;
-            sig.scanAttributeID = AttrScanAllStrength;  // Unknown
-            //sig.sigStrength = 1.0;      // this will need to be adjusted for entity/celestial types
-        } break;
+            // VEV_ANOMALY_HYGIENE (Phase A): a wreck / NPC entity / uncategorized
+            // dynamic item is NOT a cosmic anomaly. The old default blanket-tagged
+            // every such entity Group::Anomaly, leaking it into m_anomByItemID (the
+            // no-probe anomaly list get_anomalies serves) so the explore FSM warped
+            // to it. Real cosmic anomalies are registered ONLY by CreateAnomaly()/
+            // LoadAnomalies() (dungeonType==Anomaly). Don't guess unknown entities as
+            // anomalies -- skip registration entirely (as the Asteroid case does).
+            return;
+        }
     }
 
     _log(COSMIC_MGR__MESSAGE, "AnomalyMgr::AddSignal() - adding %s to anomaly list as %s(%u) with %.3f%% sigStrength.", \
@@ -594,6 +655,30 @@ void AnomalyMgr::AddSignal(SystemEntity* pSE, uint32 id/*0*/)
         m_anomByItemID.emplace(sig.sigItemID, sig);
     } else {
         m_sigByItemID.emplace(sig.sigItemID, sig);
+    }
+}
+
+// VEV_ANOM_REGEN: a combat anomaly's last wave was just cleared (SpawnMgr ->
+// DungeonMgr -> here). De-list the spent site, then SCHEDULE a replacement
+// ~5 min out (not immediate) -- EVE-real: a completed combat anomaly respawns a
+// fresh site a few minutes later, so a system's anomaly population stays roughly
+// constant and ratting never runs dry. Process() matures the delayed respawn.
+// (Implements the long-standing expiry/regeneration TODO.)
+void AnomalyMgr::OnAnomalyCleared(uint16 bubbleID)
+{
+    for (auto& kv : m_anomByItemID) {
+        if (kv.second.bubbleID != bubbleID)
+            continue;
+        uint32 itemID = kv.first;
+        RemoveSignal(itemID);                       // erases kv from m_anomByItemID
+        if (m_Anoms > 0)
+            --m_Anoms;
+        int64_t at = sEntityList.GetStamp() + ANOMALY_RESPAWN_DELAY_S;
+        m_pendingRespawns.push_back(at);
+        _log(COSMIC_MGR__MESSAGE, "AnomalyMgr::OnAnomalyCleared() - anomaly %u (bubble %u) cleared; "
+                "fresh site scheduled to respawn in %llds (stamp %lld).", \
+                itemID, bubbleID, (long long)ANOMALY_RESPAWN_DELAY_S, (long long)at);
+        return;                                     // RemoveSignal invalidated the iterator; done
     }
 }
 
