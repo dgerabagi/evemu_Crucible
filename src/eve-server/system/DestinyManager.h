@@ -210,7 +210,7 @@ public:
     double GetAgility()                                 { return m_shipAgility; }
     double GetInertia()                                 { return m_shipInertia; }
     uint32 GetStateStamp()                              { return m_stateStamp; }
-    GVector GetHeading()                                { return m_shipHeading; }
+    GVector GetHeading()                                { return m_visualHeading; }  // VEV_VISUAL_INERTIA: eased streamed facing (movement reads m_shipHeading)
 
     float GetAlignTime()                                { return m_alignTime; }
     float GetAccelTime()                                { return m_shipMaxAccelTime; }
@@ -314,6 +314,7 @@ protected:
     bool   m_arrivalStop = false;       //VEV: decelerate to a full stop on m_arrivalPoint
     GPoint m_arrivalPoint;              //VEV: real fly-to destination (m_targetPoint holds the infinite heading)
     GVector m_shipHeading;              //direction ship is facing
+    GVector m_visualHeading;           //VEV_VISUAL_INERTIA: streamed-only facing; eases toward m_shipHeading at the ship's agility rate (movement uses m_shipHeading)
     GVector m_targetHeading;            //direction to target from current heading
     std::pair<uint32, SystemEntity*> m_targetEntity;   //we do not own the SystemEntity*
 
@@ -323,6 +324,7 @@ protected:
     void Follow();                      //follow or approach object in space
     void BeginMovement();               //set initial variables for all movement (common code)
     void UpdateVelocity(bool isMoving=false);
+    void UpdateVisualHeading();         //VEV_VISUAL_INERTIA: ease the streamed facing toward m_shipHeading (visual turn inertia only; no movement effect)
 
 private:
     bool m_frozen;                      // hack to keep ship from moving when using modules that prevent movement

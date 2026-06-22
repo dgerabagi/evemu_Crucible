@@ -112,6 +112,7 @@ mvPacket(nullptr)
     m_velocity = GVector( NULL_ORIGIN );
     m_targetPoint = GPoint( NULL_ORIGIN );
     m_shipHeading = GVector( NULL_ORIGIN );
+    m_visualHeading = GVector( NULL_ORIGIN );   //VEV_VISUAL_INERTIA
     m_targetHeading = GVector( NULL_ORIGIN );
 
     m_radius = mySE->GetRadius();
@@ -189,6 +190,10 @@ void DestinyManager::ProcessState() {
         --m_postWarpCorrectionTicks;
         SetPosition(m_position, true);
     }
+
+    // VEV_VISUAL_INERTIA: ease the streamed facing toward the movement heading every tick (real
+    // agility-based turn for the CCTV/2D client; movement is unaffected — see UpdateVisualHeading).
+    UpdateVisualHeading();
 
     switch(m_ballMode) {
         case Ball::Mode::STOP: {
@@ -1248,6 +1253,40 @@ void DestinyManager::Turn() {   // tracking within 900m for Frigates, 1k4m for B
     if (is_log_enabled(DESTINY__TURN_TRACE))
         _log(DESTINY__TURN_TRACE, "Destiny::Turn() - tf:%.3f, turnTic:%u, degRemain:%.3f  (deltaHeading:%.5f, %.5f, %.5f * turnPercent:%.2f) = shipHeading:%.3f, %.3f, %.3f", \
             m_timeFraction, m_turnTic, degrees, deltaHeading.x, deltaHeading.y, deltaHeading.z, turnPercent, m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
+}
+
+// VEV_VISUAL_INERTIA: the movement heading (m_shipHeading) SNAPS at align-from-standstill for
+// movement correctness — IsTurn() A371 Bug16: the ship must accelerate toward its target, not drift
+// along a stale heading, since m_velocity = m_shipHeading * speed. But that snap also teleported the
+// STREAMED facing, so the CCTV/2D client showed an instant rotation with no inertia. This eases a
+// SEPARATE, streamed-only facing toward m_shipHeading at the ship's real agility rate (the same
+// (60-agility)/10 deg/tic model Turn() uses). GetHeading() returns m_visualHeading; nothing in
+// movement reads it (only GridStreamer + a debug command do), so there is zero movement effect.
+void DestinyManager::UpdateVisualHeading() {
+    // m_shipHeading must be a valid unit heading (skip pre-init / stopped-with-no-heading)
+    if (m_shipHeading.dotProduct(m_shipHeading) < 1.0e-6f)
+        return;
+    if (m_visualHeading.dotProduct(m_visualHeading) < 1.0e-6f) {   // fresh ball: adopt instantly
+        m_visualHeading = m_shipHeading;
+        return;
+    }
+    float dot = m_visualHeading.dotProduct(m_shipHeading);
+    if (dot > 0.99995f) {                          // aligned: lock to the movement heading
+        m_visualHeading = m_shipHeading;
+        return;
+    }
+    if (dot < -1.0f) dot = -1.0f;
+    else if (dot > 1.0f) dot = 1.0f;
+    float angRemain = std::acos(dot);                              // radians left to turn
+    float degStep = (60.0f - (float)m_shipAgility) / 10.0f;        // per-tic turn, ship-agility based (Turn() model)
+    if (degStep < 1.0f) degStep = 1.0f;                            // floor so the heaviest hulls still converge
+    float step = degStep * 0.0174532925f;                          // deg -> rad
+    float f = (angRemain > 1.0e-4f) ? (step / angRemain) : 1.0f;
+    if (f > 1.0f) f = 1.0f;
+    GVector delta(m_visualHeading, m_shipHeading);                 // = m_shipHeading - m_visualHeading
+    delta *= f;
+    m_visualHeading += delta;
+    m_visualHeading.normalize();
 }
 
 void DestinyManager::ClearTurn() {
