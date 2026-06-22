@@ -123,3 +123,5 @@ sql.tar.gz
 CMakeSettings.json
 log.ini
 *.bak*
+
+# vev pipeline live (2026-06-22): SSOT = fork feature/autopilot-fix; dev local -> commit -> push -> rebuild-server.sh git-pulls + builds. Doctrine: cognition repo docs/engine-source-pipeline.md
