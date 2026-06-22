@@ -82,6 +82,7 @@ public:
     void UpdatePlanetPins(uint32 ccPinID, uint8 pins=1);
 
     bool LoadColony(uint32 charID, uint32 planetID, PI_CCPin* ccPin);
+    static void GetColonyOwners(uint32 planetID, std::vector<uint32>& owners);  // VEV_PI_CHARID
 
     uint16 SaveRoute(uint32 ccPinID, PI_Route& route);
 };

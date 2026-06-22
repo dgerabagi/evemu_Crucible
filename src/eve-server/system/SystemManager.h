@@ -49,6 +49,7 @@ class AnomalyMgr;
 class BeltMgr;
 class DungeonMgr;
 class SpawnMgr;
+class ConcordMgr;
 class EVEServiceManager;
 
 class DynamicEntityFactory {
@@ -108,6 +109,7 @@ public:
     // CosmicMgr interface
     BeltMgr* GetBeltMgr()                               { return m_beltMgr; }
     SpawnMgr* GetSpawnMgr()                             { return m_spawnMgr; }
+    ConcordMgr* GetConcordMgr()                         { return m_concordMgr; }
     AnomalyMgr* GetAnomMgr()                            { return m_anomMgr; }
     DungeonMgr* GetDungMgr()                            { return m_dungMgr; }
 
@@ -120,6 +122,8 @@ public:
     void AddNPC(NPC* pNPC);
     void RemoveNPC(NPC* pNPC);
     void AddEntity(SystemEntity* pSE, bool addSignal=true);    // add entity to system, and (optionally) add signal to AnomalyMgr
+    uint32 DeployTower(uint32 moonID, uint32 typeID, uint32 ownerID, uint32 corpID);  // VEV_POS0
+    uint32 AnchorPosStructure(uint32 towerID, uint32 typeID, uint32 ownerID, uint32 corpID);  // VEV_POS_ANCHOR
     void RemoveEntity(SystemEntity* pSE);   // this also removes SE* from bubble and sig from AnomalyMgr (if applicable)
     void AddClient(Client* pClient, bool count=false, bool jump=false);
     void AddMarker(SystemEntity* pSE, bool sendBall=false, bool addSignal=false);    // rather specific here.
@@ -181,6 +185,7 @@ private:
     BeltMgr* m_beltMgr;         //we own this, never NULL.
     DungeonMgr* m_dungMgr;      //we own this, never NULL.
     SpawnMgr* m_spawnMgr;       //we own this, never NULL.
+    ConcordMgr* m_concordMgr;   //we own this, never NULL.  VEV_CONCORD
 
     EVEServiceManager& m_services;
     LSCService* m_lsc;
@@ -216,7 +221,9 @@ private:
     // for grid Unloading system  -allan  27June2015
     bool m_loaded;
     bool SystemActivity();
-    bool SafeToUnload();
+public:
+    bool SafeToUnload();        // VEV_SAFETOUNLOAD_PUBLIC: EntityList::Process reaper gates the system free on this
+private:
     uint16 m_players;           // current total count
     uint32 m_activityTime;
 

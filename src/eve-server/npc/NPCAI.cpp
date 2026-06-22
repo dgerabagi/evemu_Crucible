@@ -38,6 +38,7 @@
  */
 
 #include "eve-server.h"
+#include "GridStreamer.h"   // VEV_WEAPON_FIRE: rats' shots stream to 2D clients
 
 #include "Client.h"
 #include "inventory/AttributeEnum.h"
@@ -316,6 +317,22 @@ void NPCAIMgr::Process() {
                     Target(cur->GetShipSE());
                     return;
                 }
+                // VEV_PHANTOM_BUBBLE_CITIZEN: no Client* target found - also scan pilotless AI-ship
+                // phantoms (not in GetPlayers/m_players). They are destructible ships
+                // with a real TargetMgr, so targeting them is crash-safe.
+                std::vector<SystemEntity*> aiVec;
+                m_npc->SysBubble()->GetAIShips(aiVec);
+                for (auto ai : aiVec) {
+                    DestinyManager* aiDest(ai->DestinyMgr());
+                    if (aiDest == nullptr)
+                        continue;
+                    if (aiDest->IsCloaked() or aiDest->IsWarping())
+                        continue;
+                    if (m_npc->GetPosition().distance(ai->GetPosition()) > m_sightRange)
+                        continue;
+                    Target(ai);
+                    return;
+                }
                 if (sConfig.npc.IdleWander)
                     if (!m_isWandering)
                         SetWander();
@@ -474,13 +491,15 @@ void NPCAIMgr::SetChasing(SystemEntity* pSE) {
     if (pSE == nullptr)
         return;
     /** @todo implement chase timer using entityChaseMaxDuration to limit chase time. */
-    if ((m_state == NPCAI::State::Chasing) and (m_destiny->IsGoto() or m_destiny->IsFollowing()))
+    if ((m_state == NPCAI::State::Chasing) and m_destiny->IsFollowing())
         return;
     _log(NPC__AI_TRACE, "%s(%u): Begin chasing.  Target is %s(%u).", \
          m_npc->GetName(), m_npc->GetID(), pSE->GetName(), pSE->GetID());
     // target out of range to attack/follow, but within npc sight range....use mwd/ab if equiped
     m_destiny->SetMaxVelocity(m_maxSpeed);
-    m_destiny->GotoPoint(pSE->GetPosition());  //head towards target
+    // Use Follow() to continuously track the moving target, not GotoPoint() which is a static destination.
+    // GotoPoint caused NPCs to fly to a stale position and diverge to 256km+ when chasing moving players.
+    m_destiny->Follow(pSE, m_flyRange);
     m_state = NPCAI::State::Chasing;
     m_warpOutTimer.Disable();
 }
@@ -738,6 +757,11 @@ void NPCAIMgr::AttackTarget(SystemEntity* pSE) {
     m_destiny->SendSpecialEffect(m_self->itemID(), m_self->itemID(), m_self->typeID(),
                                  pSE->GetID(),0,guid,1,1,
                                  1,m_attackSpeed,0,gfxID);
+
+    // VEV_WEAPON_FIRE: surface this NPC's shot to the 2D GridStreamer so every
+    // 2D client draws the rat's fire (twin of the player-path NoteWeaponFire;
+    // groupID 0 -> client renders the default energy archetype).
+    vev::grid::NoteWeaponFire(m_self->itemID(), pSE->GetID(), m_self->typeID(), 0);
 
     Damage d(m_npc,
              m_self,

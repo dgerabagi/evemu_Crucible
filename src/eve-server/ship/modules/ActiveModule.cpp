@@ -788,7 +788,7 @@ void ActiveModule::DeactivateCycle(bool abort/*false*/)
 
     switch (groupID()) {
         case EVEDB::invGroups::Tractor_Beam: {
-            if (m_targetSE != nullptr)
+            if ((m_targetSE != nullptr) and (m_targetSE->DestinyMgr() != nullptr))
                 m_targetSE->DestinyMgr()->TractorBeamStop();
         } break;
         case EVEDB::invGroups::Afterburner:
@@ -796,7 +796,7 @@ void ActiveModule::DeactivateCycle(bool abort/*false*/)
             m_destinyMgr->SpeedBoost(true);
         } break;
         case EVEDB::invGroups::Stasis_Web: {
-            if (m_targetSE != nullptr)
+            if ((m_targetSE != nullptr) and (m_targetSE->DestinyMgr() != nullptr))
                 m_targetSE->DestinyMgr()->WebbedMe(m_modRef, false);
         } break;
         case EVEDB::invGroups::Survey_Scanner: {
@@ -855,6 +855,8 @@ void ActiveModule::DeactivateCycle(bool abort/*false*/)
                     m_targetSE->TargetMgr()->RemoveTargetModule(this);
                     m_targetSE->TargetMgr()->Destroyed();
                 }
+                // notify all ship modules targeting wreck to clear their pointers before freeing
+                m_shipRef->GetModuleManager()->RemoveTarget(m_targetSE);
                 m_targetSE->Delete();
                 SafeDelete(m_targetSE);
             }
@@ -1350,7 +1352,7 @@ void ActiveModule::ShowEffect(bool active/*false*/, bool abort/*false*/)
         shipEff.duration = (abort ? 2000 : timeLeft);  // duration in seconds
         shipEff.repeat = m_repeat;
         // will need to check and update for data miners here  (any other cases?)
-        if ((groupID() == EVEDB::invGroups::Salvager) and IsSuccess()) {
+        if ((groupID() == EVEDB::invGroups::Salvager) and IsSuccess() and (m_targetSE != nullptr)) {
             // Create Destiny Updates:
             PyTuple* type = new PyTuple(2);
                 type->SetItem(0, new PyInt(4));

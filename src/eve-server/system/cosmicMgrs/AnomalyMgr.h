@@ -42,6 +42,8 @@ class AnomalyMgr
     //  assign sigID and add to anom list to allow showing on scanner
     void AddSignal(SystemEntity* pSE, uint32 id = 0);
     void RemoveSignal(uint32 itemID);
+    // VEV_ANOM_WAVES: regen hook -- de-list a fully-cleared anomaly + queue a replacement.
+    void OnAnomalyCleared(uint16 bubbleID);
     // list for ship scanner
     void GetAnomalyList(std::vector< CosmicSignature >& sig);
     // list for probe
@@ -91,6 +93,7 @@ private:
     uint16 m_Anoms; // this counts signals added thru sysmgr also
 
     std::vector<uint8> m_typeList; // List of pregenerated signature types for this system
+    std::vector<int64_t> m_pendingRespawns; // VEV_ANOM_REGEN: mature-stamps for delayed anomaly respawns
 
     std::map<uint32, CosmicSignature> m_sigByItemID;            // signatures in system - need probes to scan down
     std::map<uint32, CosmicSignature> m_anomByItemID;           // anomalies in system - no probes needed

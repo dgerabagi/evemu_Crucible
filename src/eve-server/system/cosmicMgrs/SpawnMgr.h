@@ -45,6 +45,8 @@ public:
     // See A371 §Phase2 (Mission NPC spawning)
     void DoSpawnForMission(SystemBubble* pBubble, uint32 factionID, uint32 npcGroupID, uint8 npcCount);
     void DoSpawnForIncursion(SystemBubble* pBubble, uint32 regionID);
+    // VEV_ANOM_WAVES: spawn the first EVE-real anomaly wave (called by DungeonMgr).
+    void SpawnInitialAnomalyWave(SystemBubble* pBubble, uint32 factionID);
 
     // primitive test for chained spawns
     bool IsChaining(uint16 bubbleID);
@@ -64,6 +66,10 @@ protected:
     bool FindSpawnForBubble(uint16 bubbleID);
     bool PrepSpawn(SystemBubble* pBubble, uint8 sClass = Spawn::Class::None, uint8 level = 0);
     void MakeSpawn(SystemBubble* pBubble, uint32 factionID, uint8 sClass, uint8 level, bool anomaly=false);
+    // VEV_ANOM_WAVES: spawn one EVE-real anomaly wave; false = no such wave (cleared).
+    bool SpawnAnomalyWave(SystemBubble* pBubble, uint32 factionID, uint8 anomClass, uint8 waveNum);
+    // VEV_ANOM_WAVES: system-security -> rated-ladder anomaly class (20-29 / drone 30-39).
+    uint8 GetAnomalyClass(float sec, uint32 factionID);
     void ReSpawn(SystemBubble* pBubble, SpawnEntry& spawnEntry);
     void RemoveSpawn(uint16 bubbleID, uint32 itemID);
 

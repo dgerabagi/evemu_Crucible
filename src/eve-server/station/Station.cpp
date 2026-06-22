@@ -116,6 +116,7 @@ bool StationItem::_Load() {
 
     m_officeMap.clear();
     m_guestList.clear();
+    m_phantomGuests.clear();   // VEV_PHANTOM_TEARDOWN_SWEEP_LOAD: a reloaded station must not retain stale phantom-guest tree nodes (mirror m_guestList)
 
     stDataMgr.GetStationData(m_stationID, m_data);
     stDataMgr.LoadOffices(m_stationID, m_officeMap);
@@ -261,12 +262,18 @@ void StationItem::RemoveGuest(Client* pClient)
 // See A321 §4.7 — Phantom AI character station presence
 void StationItem::AddPhantomGuest(uint32 charID)
 {
-    m_phantomGuests.insert(charID);
+    // VEV_PHANTOM_GUEST_NOOP (2026-06-21): m_phantomGuests is WRITE-ONLY (GetPhantomGuests has zero
+    // callers; the 2D client derives station guests from the DB in Gateway.cpp handleGetStationGuests).
+    // Maintaining it only risks the erase-on-corrupted-RB-tree SIGSEGV (gdb-caught: ProcessAICommandQueue
+    // "undock" -> RemovePhantomGuest -> std::set::erase on a freed/reused node). So stop maintaining it.
+    (void)charID;
 }
 
 void StationItem::RemovePhantomGuest(uint32 charID)
 {
-    m_phantomGuests.erase(charID);
+    // VEV_PHANTOM_GUEST_NOOP (2026-06-21): see AddPhantomGuest -- write-only set, never read; no-op the
+    // erase to remove the corrupted-tree SIGSEGV class entirely.
+    (void)charID;
 }
 
 void StationItem::GetPhantomGuests(std::set<uint32>& guests) const

@@ -204,6 +204,19 @@ void DestinyManager::ProcessState() {
             }
         } break;
         case Ball::Mode::GOTO: {
+            // VEV: fly-to auto-stop. Decelerate to a full stop ON m_arrivalPoint.
+            // Log-decay braking distance: integral of v*e^(-t/tau) dt = v*tau
+            // (tau = ship agility). +1 tick of travel and a small floor so the
+            // ship parks just shy of the point instead of overshooting/rubber-banding.
+            if (m_arrivalStop) {
+                double dist = m_position.distance(m_arrivalPoint);
+                double curSpeed = m_maxShipSpeed * m_activeSpeedFraction;
+                double brakeDist = curSpeed * (m_shipAgility + 1.0) + 500.0;
+                if (dist <= brakeDist) {
+                    m_arrivalStop = false;
+                    Stop();
+                }
+            }
             MoveObject();
         } break;
         case Ball::Mode::MISSILE: {
@@ -217,13 +230,17 @@ void DestinyManager::ProcessState() {
             SetPosition(m_position + m_velocity);
         } break;
         case Ball::Mode::ORBIT: {
-            if (IsTargetInvalid())
+            if (IsTargetInvalid()) {
+                Stop();   // VEV_ORBIT_TARGET_GONE: orbit anchor destroyed (e.g. mined-out roid) -> halt + zero velocity so the ship stops reporting stale motion (2D green-vector bug)
                 return;
+            }
             Orbit();
         } break;
         case Ball::Mode::FOLLOW: {
-            if (IsTargetInvalid())
+            if (IsTargetInvalid()) {
+                Stop();   // VEV_ORBIT_TARGET_GONE: follow target gone -> halt + zero velocity
                 return;
+            }
             Follow();
         } break;
         case Ball::Mode::WARP: {
@@ -553,6 +570,7 @@ bool DestinyManager::AbortIfLoginWarping(bool showMsg) {
 }
 
 void DestinyManager::Stop() {
+    m_arrivalStop = false;   //VEV: explicit stop cancels pending fly-to auto-stop
     // Usually there's no need to show a message for this because it gets
     // triggered unnecessarily a few times upon login. Commands that should
     // show a notification are handled in BeyonceService.
@@ -596,6 +614,7 @@ void DestinyManager::Stop() {
 }
 
 void DestinyManager::Halt() {
+    m_arrivalStop = false;   //VEV
     SafeDelete(m_warpState);
 
     //  reset ALL movement variables and states.  calling this will set object to a COMPLETE and IMMEDIATE stop.
@@ -1486,7 +1505,7 @@ void DestinyManager::Orbit() {
 
     double centers = m_position.distance(Tp);
     // orbitRange = center-to-center distance for stable orbit (includes target radius)
-    double orbitRange = static_cast<double>(m_followDistance) + Tr;
+    double orbitRange = m_targetDistance + Tr; // VEV_DESYNC_FIX: commanded radius, not Santorine (orbit is emergent)
     double edges = centers - m_radius - Tr;
 
     if (is_log_enabled(DESTINY__ORBIT_TRACE))
@@ -1555,7 +1574,7 @@ void DestinyManager::Orbit() {
         desiredDir.normalize();
 
     // Orbit speed: use the same maxOrbitSpeedFraction computed in Orbit(SE*, distance) init.
-    double orbitSpeed = m_maxShipSpeed * m_maxOrbitSpeedFraction;
+    double orbitSpeed = m_maxShipSpeed; // VEV_DESYNC_FIX: command Vmax tangent; realized orbit speed emerges from the tau-lag
 
     // Desired velocity vector
     GVector desiredVelocity = desiredDir * orbitSpeed;
@@ -1822,6 +1841,7 @@ void DestinyManager::InitWarp() {
 
     GVector warp_vector(m_position, m_targetPoint);
     warp_vector.normalize();
+    m_warpDest = m_position + (warp_vector * m_targetDistance);  // VEV_WARP_HUD: dest = start + dir*total
 
     if (is_log_enabled(DESTINY__WARP_TRACE)) {
         _log(
@@ -1916,6 +1936,16 @@ void DestinyManager::InitWarp() {
     //mySE->TargetMgr()->OnTarget(nullptr, TargMgr::Mode::Clear, TargMgr::Msg::WarpingOut);
 
     WarpAccel(0);
+}
+
+// VEV_WARP_ETA: the engine's REAL remaining warp time -- warpTime (the computed
+// accel+cruise+decel duration, s) minus the seconds elapsed since warp entry (the
+// same sec_into_warp the warp phases use). The actual warp clock, not a client guess.
+double DestinyManager::GetWarpRemainingS() {
+    if (m_warpState == nullptr) return 0.0;
+    const double elapsed = (double)(sEntityList.GetStamp() - m_stateStamp);
+    const double rem = (double)m_warpState->warpTime - elapsed;
+    return rem > 0.0 ? rem : 0.0;
 }
 
 void DestinyManager::WarpAccel(uint16 sec_into_warp) {
@@ -2130,7 +2160,18 @@ void DestinyManager::WarpStop(double currentShipSpeed) {
     // See A371 Bug16 — Set ship position to the precise warp destination.
     // Use the calculated finalPos (not m_position, which may have rounding error
     // from the last WarpUpdate tick's integer decelTime).
-    SetPosition(finalPos);
+    SetPosition(finalPos, true);   // VEV: broadcast settled position to the whole bubble
+    // VEV fix: WarpStop never notified clients of the stop the way Stop() does (it sends CmdStop).
+    // A client that received this ship mid-warp via AddBallExclusive (an existing bubble occupant)
+    // overran the client-side warp-decel sim past its window -> NaN ball position -> overview
+    // distance renders as garbage (the 1.x AU bug). Mirror Stop(): SetBallPosition + CmdStop.
+    {
+        CmdStop _wsStop;
+            _wsStop.entityID = mySE->GetID();
+        PyTuple* _wsUp = _wsStop.Encode();
+        SendSingleDestinyUpdate(&_wsUp);
+        PyDecRef(_wsUp);
+    }
 
     // See A379 §17 — Server-side AP gate jump from WarpStop.
     //
@@ -2287,6 +2328,7 @@ void DestinyManager::BeginMovement() {
     // reset turn and movement checks for possible velocity change.
     m_turnTic = 0;
     m_stop = m_accel = m_decel = m_turning = false;
+    m_arrivalStop = false;   //VEV: a fresh nav command cancels any pending fly-to auto-stop
 
     if (!mySE->IsNPCSE() or (mySE->IsNPCSE() and mySE->GetNPCSE()->GetAIMgr()->IsIdle()))
         m_stateStamp = sEntityList.GetStamp();
@@ -2430,6 +2472,41 @@ void DestinyManager::GotoPoint(const GPoint& point) {
     SendSingleDestinyUpdate(&up);   // consumed
 }
 
+/* VEV: "Fly to Location" with auto-stop.  Uses the proven GotoDirection mechanism
+ * (target at infinity so the ship cruises along its heading and never auto-flips
+ * heading / rubber-bands like a finite GotoPoint target does), then the GOTO
+ * dispatch decelerates the ship to a full stop when it reaches braking distance of
+ * the real destination.  This is what right-click "Fly to" commands on the 2D grid
+ * when the ship is stopped. */
+void DestinyManager::MoveToPointAndStop(const GPoint& point, float speedFraction) {
+    if (m_orbiting)
+        ClearOrbit();
+
+    if (m_position.distance(point) < 1.0)
+        return;   // already on the point
+
+    GVector dir(m_position, point);
+    dir.normalize();
+
+    m_ballMode = Destiny::Ball::Mode::GOTO;
+    m_targetPoint = GPoint(dir.x, dir.y, dir.z) * 1.0e16;   // infinite heading -> cruise (no flip)
+    BeginMovement();                                        // clears m_arrivalStop, snaps heading
+
+    SetSpeedFraction(speedFraction, true);                  // accelerate toward the heading
+
+    // arm the arrival-stop LAST (BeginMovement / SetSpeedFraction both clear it)
+    m_arrivalPoint = point;
+    m_arrivalStop = true;
+
+    CmdGotoDirection du;
+        du.entityID = mySE->GetID();
+        du.x = dir.x;
+        du.y = dir.y;
+        du.z = dir.z;
+    PyTuple* up = du.Encode();
+    SendSingleDestinyUpdate(&up);   // consumed
+}
+
 void DestinyManager::WarpTo(const GPoint& where, int32 distance/*0*/, bool autoPilot/*false*/, SystemEntity* pSE/*nullptr*/) {
     /* warp order..
      * pick destination -> align/accel -> aura "warp drive active" -> cap drain -> accel
@@ -2477,7 +2554,12 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance/*0*/, bool autoP
             mySE->GetName(), mySE->GetID(), m_targBubble->GetID(), m_stopDistance, m_targetDistance);
 
     // npcs have no warp restrictions (yet)
-    if (mySE->IsNPCSE() or mySE->IsDroneSE()) {
+    // VEV_AISHIP_WARP (engine-v1, 2026-06-11): AIShipSE phantoms take the same
+    // fast path — they are NEITHER HasPilot() NOR IsNPCSE(), so they previously
+    // fell through BOTH warp branches and crawled in GOTO forever (the
+    // warp_to{belt}-never-engages M2 blocker). Phantom = first-class bubble
+    // citizen: one class-gate fix at the source, no per-Client* band-aids.
+    if (mySE->IsNPCSE() or mySE->IsDroneSE() or mySE->IsAIShipSE()) {
         // do drones warp??
         m_ballMode = Destiny::Ball::Mode::WARP;
 
@@ -2722,6 +2804,19 @@ void DestinyManager::Orbit(SystemEntity *pSE, uint32 distance/*0*/) {
             mySE->GetName(), mySE->GetID(), m_maxShipSpeed, distance);
         m_maxOrbitSpeedFraction = 1.0f;
         velocity = 100.0; // fallback orbit speed
+    }
+
+    // VEV_ORBIT_TIGHT (2026-06-12, combat test 3): hold the COMMANDED radius.
+    // The Santorine m_followDistance is the radius achievable at FULL speed;
+    // m_maxOrbitSpeedFraction (computed above) already slows the ship so the
+    // commanded radius IS achievable -- but the per-tick state machine compared
+    // position against m_followDistance, so a 500 m command orbited at the
+    // multi-km full-speed radius ("swings way out past weapon range").
+    // Completes the VEV_DESYNC_FIX direction (commanded radius, not Santorine).
+    {
+        double cmdRange = m_targetDistance + Tr + m_radius;
+        if (m_followDistance > cmdRange)
+            m_followDistance = cmdRange;
     }
 
     double circ = EvE::Trig::Pi2 * m_followDistance;
@@ -3094,6 +3189,7 @@ Battleships 0.155
     /** @todo check for movement when fleet boosts are applied and this is called */
     InventoryItemRef sRef = mySE->GetSelf();
     m_mass = sRef->GetAttribute(AttrMass).get_float();
+    if (m_mass <= 0.0f) m_mass = sRef->type().mass();   // VEV: phantom (AIShipSE) hulls never run Ship::Init which sets AttrMass=type().mass() -> m_mass=0 -> m_massMKg=0 -> client physics divides by 0 -> NaN distance/velocity -> '1.$ AU' overview bug. Fall back to invTypes.mass.
     m_massMKg = m_mass / 1000000; //changes mass from Kg to milliKg (10^-6)
 
     // this will catch speeds/needs for all ships (player and npc), and is easier to do here.
@@ -3103,6 +3199,17 @@ Battleships 0.155
         m_shipInertia = sRef->GetAttribute(AttrInetia).get_float();
     if (sRef->HasAttribute(AttrMaxVelocity))
         m_maxShipSpeed = sRef->GetAttribute(AttrMaxVelocity).get_float();
+    else if (sRef->type().HasAttribute(AttrMaxVelocity))
+        // VEV_PHANTOM_VELOCITY: phantom (AIShipSE) hulls never run Ship::Init, so the
+        // ship-item attr 37 is absent -> m_maxShipSpeed stays at the ctor default 100 ->
+        // the ship is capped ~100 m/s, below the 0.75*Vmax warp-align threshold (from the
+        // TYPE attr) -> it aligns forever and never warps/docks. Mirror the AttrMass
+        // fallback above: seed max speed from the hull type when the item attr is missing.
+        m_maxShipSpeed = sRef->type().GetAttribute(AttrMaxVelocity).get_float();
+    if (mySE->IsAIShipSE())
+        sLog.Cyan("VEV_PHANTOM_VEL", "%s(%u) maxShipSpeed=%.1f itemAttr37=%d typeAttr37=%.1f", \
+            mySE->GetName(), mySE->GetID(), m_maxShipSpeed, sRef->HasAttribute(AttrMaxVelocity)?1:0, \
+            sRef->type().HasAttribute(AttrMaxVelocity) ? sRef->type().GetAttribute(AttrMaxVelocity).get_float() : -1.0f);
     if (sRef->HasAttribute(AttrWarpCapacitorNeed))
         m_warpCapacitorNeed = sRef->GetAttribute(AttrWarpCapacitorNeed).get_float() *2;
 
@@ -3115,7 +3222,7 @@ Battleships 0.155
      * 75% of sub-warp max speed, or 100m/s, whichever is the lower.
      */
     m_speedToLeaveWarp = m_maxShipSpeed * 0.75f;
-    if ((m_speedToLeaveWarp < 100) and (m_maxShipSpeed > 135))      // 75% of 135 is 101.25
+    if (m_speedToLeaveWarp > 100) /*VEV_DESYNC_WARPEXIT: cap warp-exit speed at 100 per comment "whichever is the LOWER"; was inverted (only floored small values UP) so fast ships exited warp at 0.75*Vmax (e.g. 255) instead of capped 100 -> warp-exit velocity kick = client bounce*/      // 75% of 135 is 101.25
         m_speedToLeaveWarp = 100;
 
     /* The product of Mass and the Inertia Modifier gives the ship's agility

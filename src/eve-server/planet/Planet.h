@@ -61,6 +61,8 @@ public:
 
     void                        AbandonColony(Colony* pColony);
     Colony*                     GetColony(Client* pClient);
+    Colony*                     GetColony(uint32 charID);   // VEV_PI_CHARID
+    void                        LoadColonies();             // VEV_PI_CHARID: boot-time headless load
 
     bool                        HasCOSE()               { return pCO != nullptr; }
     void                        CreateCustomsOffice();

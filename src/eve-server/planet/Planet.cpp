@@ -124,6 +124,8 @@ bool PlanetSE::LoadExtras() {
     // should we check for a CO here?
     //  no, it hasnt been loaded at this point
 
+    LoadColonies();   // VEV_PI_CHARID: headless colony load (was client-gated)
+
     return true;
 }
 
@@ -262,6 +264,33 @@ Colony* PlanetSE::GetColony(Client* pClient)
     m_colonies[pClient->GetCharacterID()] = pColony;
 
     return pColony;
+}
+
+// VEV_PI_CHARID: charID-keyed colony accessor — the headless/gateway/corp path.
+Colony* PlanetSE::GetColony(uint32 charID)
+{
+    std::map<uint32, Colony*>::const_iterator itr = m_colonies.find(charID);
+    if (itr != m_colonies.end())
+        return itr->second;
+    Colony* pColony = new Colony(m_services, charID, this);
+    m_colonies[charID] = pColony;
+
+    return pColony;
+}
+
+// VEV_PI_CHARID: load every colony on THIS planet at boot so production ticks
+// headlessly. Was client-gated — colonies only existed while a player had the
+// planet open (m_colonies populated solely by GetColony(Client*)).
+void PlanetSE::LoadColonies()
+{
+    std::vector<uint32> owners;
+    PlanetDB::GetColonyOwners(GetID(), owners);
+    for (uint32 charID : owners) {
+        Colony* pColony = GetColony(charID);
+        pColony->Init();
+    }
+    if (!owners.empty())
+        _log(COLONY__DEBUG, "PlanetSE::LoadColonies() loaded %lu colony(ies) on planet %u", owners.size(), GetID());
 }
 
 void PlanetSE::AbandonColony(Colony* pColony)

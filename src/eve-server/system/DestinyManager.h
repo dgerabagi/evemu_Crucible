@@ -110,6 +110,7 @@ public:
     const GPoint &GetPosition() const                   { return m_position; }
     const GVector &GetVelocity() const                  { return m_velocity; }
     float GetSpeedFraction()                            { return m_timeFraction; }
+    float GetUserSpeedFraction()                        { return m_userSpeedFraction; }  //VEV: commanded throttle
     float GetSpeed()                                    { return (m_maxShipSpeed * m_timeFraction); }
 
     // this is only used by my bubble debug command
@@ -141,6 +142,7 @@ public:
     void AlignTo(SystemEntity* pSE);
     void GotoPoint(const GPoint &point);
     void GotoDirection(const GPoint &direction);
+    void MoveToPointAndStop(const GPoint &point, float speedFraction);  //VEV: fly-to with auto-stop on arrival
     void SetSpeedFraction(float fraction=1.0f, bool startMovement=false);
 
     /* Larger movement */
@@ -159,6 +161,11 @@ public:
     //bool IsJumping()                                  { return (m_ballMode == Destiny::Ball::Mode::STOP); }
     bool IsWarping()                                    { return (m_warpState ? true : false); }
     bool IsCloaked()                                    { return m_cloaked; }
+    GPoint GetWarpDest()                                { return m_warpDest; }                                       // VEV_WARP_HUD
+    double GetWarpTotalDist()                           { return m_warpState ? m_warpState->total_distance : 0.0; }  // VEV_WARP_HUD
+    double GetWarpSpeedMs()                             { return m_warpState ? m_warpState->warpSpeed : 0.0; }       // VEV_WARP_HUD
+    float  GetWarpTimeTotal()                           { return m_warpState ? m_warpState->warpTime : 0.0f; }       // VEV_WARP_ETA: engine's total warp time (s)
+    double GetWarpRemainingS();                                                                                       // VEV_WARP_ETA: warpTime - elapsed (impl in .cpp)
     bool IsTurning()                                    { return m_turning; }
     bool IsTractored()                                  { return m_tractored; }
 
@@ -195,6 +202,8 @@ public:
     uint32 GetTargetID()                                { return m_targetEntity.first; }
     SystemEntity* GetTargetEntity()                     { return m_targetEntity.second; }
     GPoint GetTargetPoint()                             { return m_targetPoint; }
+    GPoint GetArrivalPoint()                            { return m_arrivalPoint; }   // VEV_NAV_TELEM
+    bool   IsArrivalStop()                              { return m_arrivalStop; }    // VEV_NAV_TELEM
     double GetMaxVelocity()                             { return m_maxShipSpeed; }
     double GetFollowDistance()                          { return m_targetDistance; }
     double GetMass()                                    { return m_mass; }
@@ -302,6 +311,8 @@ protected:
     double m_callTime;                  //in ms       - time client call was processed.  this is to coordinate tic calculations
 
     GPoint m_targetPoint;               //vector      - point in space used as current destination
+    bool   m_arrivalStop = false;       //VEV: decelerate to a full stop on m_arrivalPoint
+    GPoint m_arrivalPoint;              //VEV: real fly-to destination (m_targetPoint holds the infinite heading)
     GVector m_shipHeading;              //direction ship is facing
     GVector m_targetHeading;            //direction to target from current heading
     std::pair<uint32, SystemEntity*> m_targetEntity;   //we do not own the SystemEntity*
@@ -417,6 +428,7 @@ private:
         GVector warp_vector;        //target direction based on ship's initial position
     };
     WarpState* m_warpState;		    //we own this.
+    GPoint m_warpDest;              // VEV_WARP_HUD: warp destination point (set in InitWarp)
 };
 
 #endif

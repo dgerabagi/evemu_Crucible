@@ -129,7 +129,17 @@ void MapData::GetMissionDestination(Agent* pAgent, uint8 misionType, MissionOffe
             offer.dungeonSolarSystemID  = pAgent->GetSystemID();
             return;
         } break;
-        case Mining:
+        case Mining: {
+            // Mining missions: player mines ore and delivers to agent's station.
+            // Destination = agent's station (same pattern as Encounter). See A382.
+            StationData msd = StationData();
+            stDataMgr.GetStationData(pAgent->GetStationID(), msd);
+            offer.destinationID         = pAgent->GetStationID();
+            offer.destinationOwnerID    = msd.corporationID;
+            offer.destinationSystemID   = msd.systemID;
+            offer.destinationTypeID     = msd.typeID;
+            return;
+        } break;
         case Storyline: {
             station = false;
             //destRange = offer.range;
@@ -157,6 +167,9 @@ void MapData::GetMissionDestination(Agent* pAgent, uint8 misionType, MissionOffe
                     sysList.push_back(it->second);
                 /** @todo not sure why this is empty, but have segfaults from empty vector. */
                 if (sysList.empty()) {
+                    // No neighboring systems — fall back to agent's station
+                    // See A382 — must set destinationID or MakeOffer triggers error 07208
+                    offer.destinationID         = pAgent->GetStationID();
                     StationData data = StationData();
                     stDataMgr.GetStationData(pAgent->GetStationID(), data);
                     offer.destinationOwnerID    = data.corporationID;

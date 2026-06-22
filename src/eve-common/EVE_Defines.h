@@ -204,11 +204,25 @@
 #define IsCharacterID(itemID) \
  ((itemID >= minCharacter) && (itemID <= maxCharacter))
 
+// =================== VEV_SHARD_ITEM_RANGE ===================
+// This shard's `entity` AUTO_INCREMENT lives at ~1.5e9 — far above
+// maxPlayerItem (300M) — so every recently-created ship/can/item failed
+// IsValidLocationID and InventoryItem::Move silently skipped inventory
+// bookkeeping AND the DB persist (the jet-can ghost-inventory class:
+// jettisoned ore vanished, drag-into-can dead; curator-reported 2026-06-12).
+// 1.4B..2.0B holds no other id class on this shard (DB-verified: zero rows
+// in 300M..1.4B). TODO(audit): other IsPlayerItem call sites share the
+// misclassification; widen or re-seat the auto-increment in a later pass.
+#define IsVevShardItem(itemID) \
+ ((itemID >= 1400000000) && (itemID < 2000000000))
+// =================== end VEV_SHARD_ITEM_RANGE ===================
+
 #define IsValidLocationID(itemID) \
   ((IsSolarSystemID(itemID)) \
   or (IsRegionID(itemID)) \
   or (IsStationID(itemID)) \
   or (IsPlayerItem(itemID)) \
+  or (IsVevShardItem(itemID)) \
   or (IsCharacterID(itemID)))
 
 #define IsValidOwner(itemID) \

@@ -34,6 +34,7 @@
 Seperator::Seperator( const char* str, const char* divs, const char* quotes )
 {
     bool inQuote = false, isDiv = false, isQuote = false;
+    char openQuote = '\0';
     std::string* cur(nullptr);
 
     for (size_t len = strlen( str ); len > 0; ++str, --len ) {
@@ -47,10 +48,12 @@ Seperator::Seperator( const char* str, const char* divs, const char* quotes )
                     mArgs.push_back( "" );
                     cur = &mArgs.back();
 
-                    if (isQuote)
+                    if (isQuote) {
                         inQuote = true;
-                    else
+                        openQuote = c;
+                    } else {
                         cur->push_back( c );
+                    }
                 }
             } else {
                 if (isDiv)
@@ -60,7 +63,7 @@ Seperator::Seperator( const char* str, const char* divs, const char* quotes )
             }
         } else {
             if (NULL != cur) {
-                if (isQuote)
+                if (c == openQuote)
                     cur = NULL;
                 else
                     cur->push_back( c );

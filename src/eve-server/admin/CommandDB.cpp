@@ -91,9 +91,7 @@ bool CommandDB::ItemSearch(const char *query, std::map<uint32, std::string> &int
     into.clear();
 
     //sDatabase.ReplaceSlash(query);
-    if (!sDatabase.IsSafeString(query))
-        return 0;
-
+    // See A382 — IsSafeString rejected apostrophes but DoEscapeString handles them safely
     std::string escaped;
     sDatabase.DoEscapeString(escaped, query);
 

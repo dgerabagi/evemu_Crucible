@@ -65,6 +65,7 @@ m_spawnTimer(0)
 
     m_markers.clear();
     m_players.clear();
+    m_aiShips.clear();
     m_entities.clear();
     m_dynamicEntities.clear();
 
@@ -103,6 +104,7 @@ void SystemBubble::clear() {
 
     m_markers.clear();
     m_players.clear();
+    m_aiShips.clear();
     m_entities.clear();
     m_dynamicEntities.clear();
 }
@@ -114,7 +116,12 @@ void SystemBubble::Process()
      *    missions for ??
      *    incursions for ??
      */
-    if (m_belt and (m_system->GetSystemSecurityRating() > 0.90)) // make config option here to spawn rats in secure empire space?   nope.
+    // VEV_HARVEST_BELT_RAT_PROCESS_GATE — HISTORY: convo3 (2026-06-01) removed
+    // this sec>0.90 gate to force belt rats in high-sec for the 2-pilot sandbox.
+    // RESTORED to EVE-faithful stock (no belt rats above 0.90 true sec) per the
+    // curator's no-balance-changes directive (2026-06-12, belt-ratting track):
+    // ratting belongs in low-sec (e.g. Myyhera 0.482), not in tuned high-sec.
+    if (m_belt and (m_system->GetSystemSecurityRating() > 0.90))
         return;
     if (m_spawned) {
         m_spawnTimer.Disable();
@@ -125,7 +132,7 @@ void SystemBubble::Process()
     // may be nuts, but will remain enabled as long as player in bubble and bubble has no rats.
     if (m_spawnTimer.Enabled()) {
         if (m_spawnTimer.Check()) {
-            if (!m_players.empty()) {
+            if (!m_players.empty() or !m_aiShips.empty()) {   // VEV_PHANTOM_BUBBLE_CITIZEN: phantoms trigger spawns too
                 m_system->DoSpawnForBubble(this);
             } else {
                 m_spawnTimer.Disable();
@@ -235,9 +242,15 @@ void SystemBubble::ProcessWander(std::vector<SystemEntity *> &wanderers) {
 
     pDSE = nullptr;
 
-    if (!m_players.empty() and m_spawned) {
+    if ((!m_players.empty() or !m_aiShips.empty()) and m_spawned) {   // VEV_PHANTOM_BUBBLE_CITIZEN
         ResetBubbleRatSpawn();
     }
+}
+
+// VEV_PHANTOM_BUBBLE_CITIZEN: parallel to GetPlayers (which is Client*-only).
+void SystemBubble::GetAIShips(std::vector<SystemEntity*> &into) const {
+    for (auto& cur : m_aiShips)
+        into.push_back(cur.second);
 }
 
 void SystemBubble::Add(SystemEntity* pSE) {
@@ -314,6 +327,26 @@ void SystemBubble::Add(SystemEntity* pSE) {
         // }
     }
 
+    // ===================== VEV_PROJECTION_GATE (conv9 -- get_overview projection bug) =====================
+    // In-space-vs-docked gate. A DOCKED pilot's ShipSE must NOT enter the bubble's dynamic
+    // entity map -- otherwise it leaks into get_overview as a phantom on-grid contact
+    // (conv4: docked-hangar entities leaking into the undock-corridor bubble at Deepari II).
+    // Client* path only: HasPilot() is FALSE for the AIShipSE phantom, so AI ships are
+    // unaffected; in-space pilots are not IsDocked(), so live contacts are unaffected.
+    // Mirrors the verified docked-test (GenericModule.cpp:66/154, ModuleManager.cpp:1007,
+    // DestinyManager.cpp:2251; Client::IsDocked() = sDataMgr.IsStation(m_locationID), Client.h:232).
+    if (pSE->HasPilot() and pSE->GetPilot()->IsDocked()) {
+        _log(
+            DESTINY__BUBBLE_TRACE,
+            "SystemBubble::Add() - VEV_PROJECTION_GATE: skipping DOCKED pilot %s(%u) for bubble %u (not in space).",
+            pSE->GetName(),
+            pSE->GetID(),
+            m_bubbleID
+        );
+        return;
+    }
+    // =================== end VEV_PROJECTION_GATE ===================
+
     // See A321 §4.2 — AI ships trigger belt/gate spawns like players do
     if (pSE->HasPilot() or pSE->IsAIShipSE()) {
         sLog.Green("  SystemBubble", "Add() belt/spawn check: entity=%s(%u) HasPilot=%d IsAIShip=%d m_belt=%d bubble=%u",
@@ -352,6 +385,9 @@ void SystemBubble::Add(SystemEntity* pSE) {
             if (!m_players.empty()) {
                 AddBallExclusive(pSE);
             }
+            // VEV_PHANTOM_BUBBLE_CITIZEN: register the pilotless phantom as a bubble resident so the
+            // belt-rat spawn gate + NPC aggro honor it (m_players is Client*-only).
+            m_aiShips[pSE->GetID()] = pSE;
         }
     } else {
         if (!m_players.empty())
@@ -409,6 +445,7 @@ void SystemBubble::Untrack(SystemEntity *pSE) {
     );
 
     m_dynamicEntities.erase(pseId);
+    m_aiShips.erase(pseId);   // VEV_PHANTOM_BUBBLE_CITIZEN
 
     if (pSE->HasPilot()) {
         _log(
@@ -461,6 +498,20 @@ void SystemBubble::Untrack(SystemEntity *pSE) {
  * `SystemEntity` is a `nullptr`, it is not assumed to be in space - call
  * `Untrack` instead if you don't want to do this.
  */
+// VEV_BUBBLE_PURGE (2026-06-12, belt-ratting track): an entity that hopped
+// bubbles (warping rat, respawned roid, AI ship) can sit in an OLD bubble's
+// maps while m_bubble points elsewhere; deletion then cleans only the new
+// bubble and ProcessWander/Process deref the freed pointer — the belt-rat
+// segfault class (6 self-healed restarts on 2026-06-12 alone). This purge has
+// no preconditions and no broadcast side-effects: pure map hygiene.
+void SystemBubble::PurgeEntity(uint32 itemID)
+{
+    m_entities.erase(itemID);
+    m_dynamicEntities.erase(itemID);
+    m_aiShips.erase(itemID);
+    m_drones.erase(itemID);
+}
+
 void SystemBubble::Remove(SystemEntity *pSE) {
     Untrack(pSE);
 
@@ -496,6 +547,9 @@ void SystemBubble::ResetBubbleRatSpawn()
 
 void SystemBubble::SetSpawnTimer(bool isBelt/*false*/)
 {
+    // VEV_HARVEST_BELT_RAT_UNIVERSAL — HISTORY: convo3 (2026-05-31) removed this
+    // sec>0.90 gate for the sandbox era. RESTORED to EVE-faithful stock
+    // (2026-06-12): rats arm only at/below 0.90 true sec — CCP balance kept.
     if (m_system->GetSystemSecurityRating() > 0.90)
         return;
     if (sConfig.debug.SpawnTest) {

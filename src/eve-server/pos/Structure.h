@@ -194,6 +194,7 @@ public:
     bool                        IsReinforced()          { return (m_data.state == EVEPOS::StructureState::Reinforced); }
 
     void                        SendSlimUpdate();
+    void                        VevAnchorPreSave(uint32 towerID, uint32 anchorMoonID);  // VEV_POS_ANCHOR
 
 protected:
     void                        SendEffectUpdate(int16 effectID, bool active);

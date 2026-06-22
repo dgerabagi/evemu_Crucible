@@ -29,6 +29,10 @@
 #include "system/SystemBubble.h"
 #include "system/SystemManager.h"
 
+// VEV_POS_FUEL: a tower burns this many fuel blocks every interval; out of fuel -> offline.
+static const int64 VEV_POS_FUEL_SEC = 60;
+static const uint32 VEV_POS_FUEL_PER_TICK = 1;
+
 /** @todo (Allan) this class needs more research to finish
  * see pics in ::GamePC/G/games/EvE/misc/POS
  * flagStructureActive             = 144,
@@ -104,7 +108,8 @@
 
 TowerSE::TowerSE(StructureItemRef structure, EVEServiceManager& services, SystemManager* system, const FactionData& fData)
 : StructureSE(structure, services, system, fData),
-m_pShieldSE(nullptr)
+m_pShieldSE(nullptr),
+m_vevNextFuel(0)
 {
     m_hasShield = false;
     m_structs.clear();
@@ -130,6 +135,25 @@ m_pShieldSE(nullptr)
      *
      *
      */
+}
+
+// VEV_POS0: headless deploy — set base+tower data, persist, online (no Client*).
+void TowerSE::VevDeployHeadless(uint32 anchorID) {
+    m_data.itemID = m_self->itemID();
+    m_data.towerID = 0;
+    m_data.anchorpointID = anchorID;
+    m_data.use = 1; m_data.view = 1; m_data.take = 1;
+    m_data.state = EVEPOS::StructureState::Online;
+    m_data.status = EVEPOS::StructureState::Online;
+    m_data.timestamp = GetFileTimeNow();
+    m_procState = EVEPOS::ProcState::Online;
+    m_self->SetFlag(flagStructureActive);
+    m_db.UpdateBaseData(m_data);          // StructureSE::Init already INSERTed the row (state 0) — UPDATE it to Online
+    m_db.SaveTowerData(m_tdata, m_data);  // INSERT posTowerData
+    // structures have NO DestinyManager (only mobile items do) — guard the client broadcast that SetOnline() assumes.
+    // proc timer left disabled (ctor default) so Process() skips the destiny-deref transition block.
+    if (m_destiny != nullptr)
+        m_destiny->SendSpecialEffect(m_data.itemID, m_data.itemID, m_self->typeID(), 0, 0, "effects.StructureOnlined", 0, 1, 1, -1, 0);
 }
 
 void TowerSE::Init()
@@ -187,16 +211,53 @@ void TowerSE::Scoop() {
     m_self->SaveItem();
 }
 
+void TowerSE::VevReonline()
+{
+    // VEV_POS_FUEL: bring a fuel-starved tower back Online (force field up). Headless —
+    // sets state directly + persists (mirrors VevDeployHeadless), re-arms the fuel throttle.
+    m_data.state  = EVEPOS::StructureState::Online;
+    m_data.status = EVEPOS::StructureState::Online;
+    m_data.timestamp = GetFileTimeNow();
+    m_self->SetFlag(flagStructureActive);
+    m_procState = EVEPOS::ProcState::Online;
+    m_vevNextFuel = 0;
+    m_db.UpdateBaseData(m_data);
+}
+
 void TowerSE::Process()
 {
     /* called by EntityList::Process on every loop */
-
-    // starbase charter checks for empire space
-
-    // tower-specific tests here
-
-    /*  Enable base call to Process Anchoring, Targeting and Movement  */
     StructureSE::Process();
+
+    // VEV_POS_FUEL: a Control Tower burns fuel blocks over time. Out of fuel -> the force field
+    // drops (tower -> Anchored): its structures become vulnerable AND stop producing (their
+    // auto-proc gates on tower Online). Cheap in-memory throttle; no DestinyManager to deref.
+    if (m_data.state < EVEPOS::StructureState::Online)
+        return;
+    int64 now = GetFileTimeNow();
+    if (m_vevNextFuel == 0) { m_vevNextFuel = now + (VEV_POS_FUEL_SEC * EvE::Time::Second); return; }
+    if (now < m_vevNextFuel)
+        return;
+    m_vevNextFuel = now + (VEV_POS_FUEL_SEC * EvE::Time::Second);
+
+    const uint32 towerID = m_data.itemID;
+    uint32 need = VEV_POS_FUEL_PER_TICK;
+    DBQueryResult r; DBResultRow row;
+    sDatabase.RunQuery(r, "SELECT e.itemID, e.quantity FROM entity e JOIN invTypes t ON t.typeID=e.typeID WHERE e.locationID=%u AND t.groupID=1136 ORDER BY e.quantity ASC", towerID);
+    while (need > 0 && r.GetRow(row)) {
+        uint32 itemID = row.GetUInt(0), q = row.GetUInt(1);
+        InventoryItemRef iRef = sItemFactory.GetItemRef(itemID);
+        if (iRef.get() == nullptr) continue;
+        if (q <= need) { need -= q; iRef->Delete(); }
+        else { iRef->SetQuantity(q - need); need = 0; }
+    }
+    if (need > 0) {
+        m_data.state = EVEPOS::StructureState::Anchored;
+        m_data.status = EVEPOS::StructureState::Anchored;
+        m_data.timestamp = now;
+        m_db.UpdateBaseData(m_data);
+        _log(POS__MESSAGE, "TowerSE::Process() VEV - tower %u OUT OF FUEL -> offline (force field down)", towerID);
+    }
 }
 
 /*

@@ -30,6 +30,9 @@
 #include "../../eve-common/EVE_Damage.h"
 
 #include "Client.h"
+#include "EVE_Corp.h"
+#include "system/SystemManager.h"
+#include "system/cosmicMgrs/ConcordMgr.h"
 #include "EntityList.h"
 #include "EVEServerConfig.h"
 #include "manufacturing/Blueprint.h"
@@ -117,6 +120,23 @@ bool SystemEntity::ApplyDamage(Damage &d) {
             d.srcSE->GetPilot()->QueueDestinyEvent(&tuple);
         }
         return false;
+    }
+
+    // VEV_CONCORD (2026-06-13): CONCORD police are IMMUNE — the response can
+    // never be fought off. (Checked on the victim BEFORE any damage lands.)
+    if (GetCorporationID() == corpCONCORD)
+        return false;
+    // VEV_CONCORD trigger: a pilot illegally aggressing another CAPSULEER in a
+    // high-sec system (trueSec >= 0.45) arms a police response on the AGGRESSOR.
+    // Works for PHANTOM AI pilots (AIShipSE, no Client*) which the engine's own
+    // Client*-gated sec-penalty skips. Capsuleer = ShipSE (player) OR AIShipSE
+    // (AI pilot); NPC rats and CONCORD itself never trigger it.
+    if ((d.srcSE != nullptr) && (d.srcSE != this) && (m_system != nullptr)
+        && (m_system->GetSystemSecurityRating() >= 0.45)) {
+        const bool srcCap = (d.srcSE->IsShipSE() || d.srcSE->IsAIShipSE());
+        const bool tgtCap = (IsShipSE() || IsAIShipSE());
+        if (srcCap && tgtCap && (m_system->GetConcordMgr() != nullptr))
+            m_system->GetConcordMgr()->ArmResponse(d.srcSE);
     }
 
     double profileStartTime(GetTimeUSeconds());

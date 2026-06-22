@@ -121,21 +121,24 @@ bool AnomalyMgr::Init(BeltMgr* beltMgr, DungeonMgr* dungMgr, SpawnMgr* spawnMgr)
 
     // set internal check data
     // range is 0.1 for 1.0 system to 2.0 for -0.9 system
-    float security = m_system->GetSecValue();
+    float security = m_system->GetSystemSecurityRating();  // VEV_ANOM_DENSITY_FIX 2026-06-20: GetSecValue()=(1.1-trueSec) collapsed hi-sec to m_maxSigs=3; use TRUE security so >0.749 hi-sec -> 12 sigs -> 6 anomalies
+    // VEV_ANOM_DENSITY (curator-approved 2026-06-19): use EVE-real security-scaled anomaly
+    // density even on the test server. The old flat test-server m_maxSigs=3 left every
+    // system with ~1 combat anomaly (3 sigs, m_maxSigs/2 = 1 anomaly), so AI ratters cleared
+    // it and the system went DRY ("no anomalies up — docking to await respawn"). Security
+    // scaling gives high-sec (0.75-0.99) 12 sigs (~6 anomalies) -> a system is never dry
+    // between clears -> continuous ratting. NEEDS A SERVER REBUILD + RESTART (curator-commanded).
+         if (security == 2.0)  { m_maxSigs = 25; }
+    else if (security > 1.499) { m_maxSigs = 20; }
+    else if (security > 0.999) { m_maxSigs = 15; }
+    else if (security > 0.749) { m_maxSigs = 12; }
+    else if (security > 0.449) { m_maxSigs = 8; }
+    else if (security > 0.249) { m_maxSigs = 5; }
+    else                       { m_maxSigs = 3; }
     if (sConfig.debug.IsTestServer) {
-        m_maxSigs = 3;
-
         // Add wormholes by default to the type list for test server
         m_typeList.push_back(Dungeon::Type::Wormhole);
         m_WH++;
-    } else {
-             if (security == 2.0)  { m_maxSigs = 25; }
-        else if (security > 1.499) { m_maxSigs = 20; }
-        else if (security > 0.999) { m_maxSigs = 15; }
-        else if (security > 0.749) { m_maxSigs = 12; }
-        else if (security > 0.449) { m_maxSigs = 8; }
-        else if (security > 0.249) { m_maxSigs = 5; }
-        else                       { m_maxSigs = 3; }
     }
 
     m_procTimer.Start(1000); // Initial 5s timer to ensure everything gets loaded correctly
@@ -220,6 +223,14 @@ void AnomalyMgr::Process() {
             }
             if (vevRelic < 1) m_typeList.push_back(Dungeon::Type::Magnetometric);
             if (vevData  < 1) m_typeList.push_back(Dungeon::Type::Radar);
+            // VEV_ANOM_FLOOR (2026-06-19): keep COMBAT anomalies topped up to ~m_maxSigs/2 too.
+            // The initial fill can be lost to a warp-in race (pilot not yet bubbled at the first
+            // drain) and the 300s respawn only trickles one back, so systems sat at ~1 anomaly
+            // instead of the intended ~6. Count live + already-queued combat anomalies, refill the gap.
+            int vevAnom = (int)m_anomByItemID.size();
+            for (uint8 t : m_typeList) if (t == Dungeon::Type::Anomaly) ++vevAnom;
+            for (int k = vevAnom; k < (m_maxSigs / 2); ++k)
+                m_typeList.push_back(Dungeon::Type::Anomaly);
         }
         if (vevPilotHere && m_typeList.size () > 0) {
             auto cur = m_typeList.begin();

@@ -469,6 +469,23 @@ void StructureSE::Scoop()
     m_self->ChangeSingleton(false);
 }
 
+// VEV_POS_ANCHOR: headless anchor of a POS module (silo / moon-harvesting array / reactor)
+// at a tower. Pre-saves the posStructureData row (state Online, towerID set) BEFORE Init runs,
+// so StructureSE::Init's GetBaseData loads towerID and the m_module branch binds the tower
+// (AddModule) — mirroring the normal DynamicEntityFactory load path. Structures have NO
+// DestinyManager, so there is no client-effect broadcast here (kept minimal + crash-safe).
+void StructureSE::VevAnchorPreSave(uint32 towerID, uint32 anchorMoonID)
+{
+    m_data.itemID = m_self->itemID();
+    m_data.towerID = towerID;
+    m_data.anchorpointID = anchorMoonID;
+    m_data.use = 1; m_data.view = 1; m_data.take = 1;
+    m_data.state = EVEPOS::StructureState::Online;
+    m_data.status = EVEPOS::StructureState::Online;
+    m_data.timestamp = GetFileTimeNow();
+    m_db.SaveBaseData(m_data);   // INSERT row so Init's GetBaseData loads Online + towerID
+}
+
 void StructureSE::Process()
 {
     /* called by EntityList::Process on every loop */

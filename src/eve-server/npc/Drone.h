@@ -74,12 +74,12 @@ public:
     Client* GetOwner()                                  { return m_pClient; }
     DroneAIMgr* GetAI()                                 { return m_AI; }
 
-    void Launch(ShipSE* pShipSE);           //add drone entity to system
-    void Online(ShipSE* pShipSE=nullptr);         //  if nullptr sent, assign to controlling ship
+    void Launch(SystemEntity* pShipSE);           //add drone entity to system  // VEV_DRONE: was ShipSE*
+    void Online(SystemEntity* pShipSE=nullptr);         //  if nullptr sent, assign to controlling ship  // VEV_DRONE
     void Offline();
     void StateChange();
     //begin idle orbit around assigned ship
-    void IdleOrbit(ShipSE* pShipSE=nullptr);
+    void IdleOrbit(SystemEntity* pShipSE=nullptr);  // VEV_DRONE: was ShipSE*
 
     void SaveDrone();
     void RemoveDrone();
@@ -107,15 +107,15 @@ public:
     void Disable()                                      { m_online = false; }
     bool IsEnabled()                                    { return m_online; }
 
-    void AssignShip(ShipSE* pSE)                        { m_AI->AssignShip(pSE); }
+    void AssignShip(SystemEntity* pSE)                  { m_AI->AssignShip(pSE); }  // VEV_DRONE
     void SetTarget(SystemEntity* pSE = nullptr)         { (pSE == nullptr ? 0 : m_targetID = pSE->GetID()); }
 
-    ShipSE* GetHomeShip()                               { return m_pShipSE; }
+    SystemEntity* GetHomeShip()                         { return m_pShipSE; }  // VEV_DRONE
 
 protected:
     Client* m_pClient;          //we do not own this
     DroneAIMgr* m_AI;           //we do own this
-    ShipSE* m_pShipSE;            //we do not own this
+    SystemEntity* m_pShipSE;            //we do not own this  // VEV_DRONE: was ShipSE*
     SystemManager* m_system;    //we do not own this
 
 private:

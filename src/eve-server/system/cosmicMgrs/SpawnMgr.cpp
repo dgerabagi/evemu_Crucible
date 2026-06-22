@@ -259,28 +259,39 @@ void SpawnMgr::SpawnKilled(SystemBubble* pBubble, uint32 itemID)
             pBubble->SetSpawned(false);
     } else if (pBubble->IsAnomaly()) {
         _log(SPAWN__DEPOP, "SpawnMgr::SpawnKilled::Anomaly - called by %u.", itemID);
-        if (m_spawns.count(pBubble->GetID()) == 1) {
-            // last npc in this wave.  get data needed for next wave, if applicable.
-            SpawnEntryDef::iterator itr = m_spawns.find(pBubble->GetID());
-            if (itr == m_spawns.end())
-                return; // this is an error.
-            MakeSpawn(pBubble, itr->second.factionID, itr->second.spawnClass, itr->second.level);
-            // now remove this spawn from map.
-            m_spawns.erase(itr);
-            // unlock warp gate if applicable
-        } else if (m_spawns.count(pBubble->GetID()) < 1) {
-            // this is an error...
-        } else {
-            // there are still npcs in this wave....continue.
+        // VEV_ANOM_WAVES: real multi-wave anomalies. Capture this wave's
+        // (faction, anomaly-class, wave#) from the dying rat BEFORE removing it
+        // (every rat in a wave carries the same trio), decrement, and when the
+        // wave is fully dead spawn the next wave. When there is no next wave the
+        // site is CLEARED -> tear the bubble down and signal AnomalyMgr to
+        // regenerate a replacement (keeps the system farmable, EVE-real).
+        // (The original branch never removed the dead rat, so count() never hit
+        // its gate -- anomaly chaining was dead code; found 2026-06-15.)
+        uint32 facID = 0; uint8 aClass = 0, wave = 0; bool found = false;
+        auto rng = m_spawns.equal_range(pBubble->GetID());
+        for (auto i = rng.first; i != rng.second; ++i) {
+            if (i->second.itemID == itemID) {
+                facID = i->second.factionID;
+                aClass = i->second.spawnClass;
+                wave = i->second.level;
+                found = true;
+                break;
+            }
         }
-
-        /*  this needs to deal with multiple things.
-         * 1- unlocking warp gates when needed per wave
-         * 2- dropping loot according to (wave/dungeon/template)?
-         * 3- after last spawn, possible escelation per dungeon type?   this should signal anomaly mgr to create the escelation
-         * 4- spawn next wave, if applicable  (code above...currently testing)
-         * 5- more/others?
-         */
+        RemoveSpawn(pBubble->GetID(), itemID);
+        if (found && (m_spawns.count(pBubble->GetID()) == 0)) {
+            if (!SpawnAnomalyWave(pBubble, facID, aClass, wave + 1)) {
+                _log(SPAWN__DEPOP, "SpawnMgr::SpawnKilled - Anomaly bubble %u CLEARED (last wave %u, class %u). Signalling regen.", \
+                        pBubble->GetID(), wave, aClass);
+                auto bitr = std::find(m_bubbles.begin(), m_bubbles.end(), pBubble);
+                if (bitr != m_bubbles.end())
+                    m_bubbles.erase(bitr);
+                pBubble->ResetBubbleRatSpawn();
+                m_system->RemoveSpawnBubble(pBubble);
+                if (m_dungMgr != nullptr)
+                    m_dungMgr->NotifyAnomalyCleared(pBubble->GetID());
+            }
+        }
     } else if (pBubble->IsMission()) {
         _log(SPAWN__DEPOP, "SpawnMgr::SpawnKilled::Mission - called by %u.", itemID);
         // See A371 §Phase3 (Mission kill tracking and completion)
@@ -322,6 +333,10 @@ void SpawnMgr::DoSpawnForAnomaly(SystemBubble* pBubble, GPoint pos, uint8 level,
     SpawnGroup group;
     group.quantity = 1;
     group.typeID = typeID;
+    // VEV_ANOM_SPAWN_PUSH: the group was built but never queued -- the
+    // size()>0 gate below always failed and anomalies spawned ZERO NPCs
+    // (every push_back call site was the belt/gate path; found 2026-06-12).
+    m_toSpawn.push_back(group);
 
     if (m_toSpawn.size() > 0) {
         if (is_log_enabled(SPAWN__MESSAGE)) {
@@ -421,6 +436,106 @@ void SpawnMgr::DoSpawnForAnomaly(SystemBubble* pBubble, GPoint pos, uint8 level,
     return;
 }
 
+// VEV_ANOM_WAVES: EVE-real, faction-generic anomaly wave spawner. Rat *counts*
+// per wave come from npcSpawnClass (anomaly classes 20-39, column f/af/d/c/ac/
+// bc/bs); the actual rat *types* come from the anomaly faction's own ship groups
+// (GetNPCGroups + GetRandTypeID), so every pirate AND rogue-drone faction's
+// anomalies escalate correctly with zero per-faction hand-authoring. Returns
+// false when class 'anomClass' has no wave 'waveNum' (i.e. the site is cleared).
+bool SpawnMgr::SpawnAnomalyWave(SystemBubble* pBubble, uint32 factionID, uint8 anomClass, uint8 waveNum)
+{
+    if (pBubble == nullptr)
+        return false;
+    pBubble->SetAnomaly();
+
+    if (!sDataMgr.GetNPCGroups(factionID, m_factionGroups)) {
+        _log(SPAWN__ERROR, "SpawnMgr::SpawnAnomalyWave() - No RatFaction data for faction %u.", factionID);
+        return false;
+    }
+
+    RatSpawnClassVec waves;
+    if (!sDataMgr.GetNPCClasses(anomClass, waves)) {
+        _log(SPAWN__ERROR, "SpawnMgr::SpawnAnomalyWave() - No class data for anomaly class %u.", anomClass);
+        m_factionGroups.clear();
+        return false;
+    }
+    // pick the wave by its .sub (robust against load order), not by position.
+    RatSpawnClass w = RatSpawnClass();
+    bool haveWave = false;
+    for (auto& rsc : waves)
+        if (rsc.sub == waveNum) { w = rsc; haveWave = true; break; }
+    waves.clear();
+    if (!haveWave) {
+        m_factionGroups.clear();
+        return false;   // no such wave -> site cleared
+    }
+
+    // anomaly ship variants are at faction-group offset 14 (1+14 .. 7+14),
+    // mirroring PrepSpawn's shipClass handling for sClass > BeltSpawn.
+    const uint8 off = 14;
+    SpawnGroup tos = SpawnGroup();
+    if (w.f  > 0) { tos.typeID = GetRandTypeID(1 + off); tos.quantity = w.f;  m_toSpawn.push_back(tos); }
+    if (w.af > 0) { tos.typeID = GetRandTypeID(2 + off); tos.quantity = w.af; m_toSpawn.push_back(tos); }
+    if (w.d  > 0) { tos.typeID = GetRandTypeID(3 + off); tos.quantity = w.d;  m_toSpawn.push_back(tos); }
+    if (w.c  > 0) { tos.typeID = GetRandTypeID(4 + off); tos.quantity = w.c;  m_toSpawn.push_back(tos); }
+    if (w.ac > 0) { tos.typeID = GetRandTypeID(5 + off); tos.quantity = w.ac; m_toSpawn.push_back(tos); }
+    if (w.bc > 0) { tos.typeID = GetRandTypeID(6 + off); tos.quantity = w.bc; m_toSpawn.push_back(tos); }
+    if (w.bs > 0) { tos.typeID = GetRandTypeID(7 + off); tos.quantity = w.bs; m_toSpawn.push_back(tos); }
+    // rogue drones: no officers; bc/bs become swarm packs (mirror PrepSpawn).
+    if (factionID == factionRogueDrones) {
+        if ((w.bc > 0) || (w.bs > 0)) {
+            tos.typeID = GetRandTypeID(22);
+            tos.quantity = ((w.bs > 0 ? w.bs : w.bc) * 4);
+            m_toSpawn.push_back(tos);
+        }
+    }
+    m_factionGroups.clear();
+
+    if (m_toSpawn.empty()) {
+        _log(SPAWN__ERROR, "SpawnMgr::SpawnAnomalyWave() - class %u wave %u resolved to no rats.", anomClass, waveNum);
+        return false;
+    }
+    _log(SPAWN__POP, "SpawnMgr::SpawnAnomalyWave() - faction %u, class %u, wave %u: %u group(s).", \
+            factionID, anomClass, waveNum, m_toSpawn.size());
+    // MakeSpawn tags each SpawnEntry with spawnClass=anomClass, level=waveNum,
+    // factionID -> SpawnKilled reads them back to chain to the next wave.
+    MakeSpawn(pBubble, factionID, anomClass, waveNum, true);
+    return true;
+}
+
+// VEV_ANOM_WAVES: map system security to the EVE-real rated ladder
+// (Hideaway..Sanctum, 20-29); rogue-drone factions use the parallel drone
+// ladder (Cluster..Horde, 30-39 = +10).
+// NOTE the scale: SystemManager::GetSecValue() returns (1.1 - trueSec), i.e.
+// ~0.1 for a 1.0 hi-sec system up to ~2.0 for -0.9 deep null (SystemManager.cpp).
+// So SMALL secVal = safe (low tier), LARGE = dangerous (high tier).
+uint8 SpawnMgr::GetAnomalyClass(float secVal, uint32 factionID)
+{
+    uint8 cls;
+    if      (secVal <= 0.25) cls = Spawn::Class::Hideaway;   // trueSec >~0.85  (hi-sec) -> frigates
+    else if (secVal <= 0.45) cls = Spawn::Class::Refuge;     // ~0.65-0.85 hi-sec
+    else if (secVal <= 0.65) cls = Spawn::Class::Den;        // ~0.45-0.65 hi/low edge
+    else if (secVal <= 0.95) cls = Spawn::Class::Yard;       // low-sec
+    else if (secVal <= 1.15) cls = Spawn::Class::Port;       // low/null edge
+    else if (secVal <= 1.45) cls = Spawn::Class::Hub;        // null
+    else if (secVal <= 1.75) cls = Spawn::Class::Haven;      // null
+    else                     cls = Spawn::Class::Sanctum;    // deep null
+    if (factionID == factionRogueDrones)
+        cls += 10;   // 30-39 drone ladder
+    return cls;
+}
+
+// VEV_ANOM_WAVES: entry point from DungeonMgr::MakeDungeon -- pick the tier from
+// system security + anomaly faction and spawn the first wave. Subsequent waves
+// chain from SpawnKilled.
+void SpawnMgr::SpawnInitialAnomalyWave(SystemBubble* pBubble, uint32 factionID)
+{
+    uint8 cls = GetAnomalyClass(m_system->GetSecValue(), factionID);
+    _log(SPAWN__POP, "SpawnMgr::SpawnInitialAnomalyWave() - faction %u -> class %u (sec %.2f).", \
+            factionID, cls, m_system->GetSecValue());
+    SpawnAnomalyWave(pBubble, factionID, cls, 1);
+}
+
 void SpawnMgr::DoSpawnForIncursion(SystemBubble* pBubble, uint32 regionID)
 {
     if (pBubble == nullptr)
@@ -441,23 +556,42 @@ void SpawnMgr::DoSpawnForMission(SystemBubble* pBubble, uint32 factionID, uint32
 
     pBubble->SetMission();
 
+    // See A371 — Mission rats must be HOSTILE to the player.  The agent's own
+    // factionID is the PLAYER's allied faction, so spawning rats with that makes
+    // them appear friendly/neutral in the overview and breaks the mission.  Map
+    // the agent's faction to the canonical pirate antagonist instead.
+    uint32 enemyFactionID = factionID;
+    switch (factionID) {
+        case factionAmarr:    enemyFactionID = factionBloodRaider; break;  // Amarr → Blood Raiders
+        case factionCaldari:  enemyFactionID = factionGuristas;    break;  // Caldari → Guristas
+        case factionMinmatar: enemyFactionID = factionAngel;       break;  // Minmatar → Angel Cartel
+        case factionGallente: enemyFactionID = factionSerpentis;   break;  // Gallente → Serpentis
+        case factionAmmatar:  enemyFactionID = factionBloodRaider; break;
+        case factionKhanid:   enemyFactionID = factionBloodRaider; break;
+        default: break;  // already a pirate faction or unknown — use as-is
+    }
+
     sLog.Green("DoSpawnForMission", "Spawning %u NPCs from group %u for mission in bubble %u (IsMission=%s).",
             npcCount, npcGroupID, pBubble->GetID(), pBubble->IsMission() ? "true" : "false");
 
     GPoint startPos(pBubble->GetCenter());
-    uint32 corpID = sDataMgr.GetFactionCorp(factionID);
-    sLog.Green("DoSpawnForMission", "factionID=%u, corpID=%u, center=(%.0f, %.0f, %.0f).",
-            factionID, corpID, startPos.x, startPos.y, startPos.z);
+    uint32 corpID = sDataMgr.GetFactionCorp(enemyFactionID);
+    sLog.Green("DoSpawnForMission", "agentFaction=%u, enemyFaction=%u, corpID=%u, center=(%.0f, %.0f, %.0f).",
+            factionID, enemyFactionID, corpID, startPos.x, startPos.y, startPos.z);
     FactionData data = FactionData();
-        data.allianceID = factionID;
+        data.allianceID = enemyFactionID;
         data.corporationID = corpID;
-        data.factionID = (factionID == factionRogueDrones ? 0 : factionID);
+        data.factionID = (enemyFactionID == factionRogueDrones ? 0 : enemyFactionID);
         data.ownerID = corpID;
 
-    // Query random NPC typeIDs from the specified group
+    // Query random NPC typeIDs from the specified group, excluding types with no attributes (broken/placeholder entries)
     DBQueryResult res;
     if (!sDatabase.RunQuery(res,
-        "SELECT typeID FROM invTypes WHERE groupID = %u ORDER BY RAND() LIMIT %u",
+        "SELECT it.typeID FROM invTypes it"
+        " INNER JOIN dgmTypeAttributes da ON da.typeID = it.typeID"
+        " WHERE it.groupID = %u"
+        " GROUP BY it.typeID"
+        " ORDER BY RAND() LIMIT %u",
         npcGroupID, npcCount))
     {
         sLog.Error("DoSpawnForMission", "Failed to query NPC types for groupID %u.", npcGroupID);
@@ -510,7 +644,7 @@ void SpawnMgr::DoSpawnForMission(SystemBubble* pBubble, uint32 factionID, uint32
         se.typeID = typeID;
         se.spawnID = m_spawnID;
         se.corpID = corpID;
-        se.factionID = factionID;
+        se.factionID = enemyFactionID;
         se.spawnClass = Spawn::Class::None;
         se.spawnGroup = 0;
         se.level = 1;

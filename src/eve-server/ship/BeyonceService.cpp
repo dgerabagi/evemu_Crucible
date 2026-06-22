@@ -455,8 +455,29 @@ PyResult BeyonceBound::CmdWarpToStuff(PyCallArgs &call, PyString* type, PyRep* i
     //  fleet warping
     // [warptomember] char, charid, minrange
     // [warpfleettomember] char, charid, minrange, fleet=1
-        call.client->SendErrorMsg("WarpToChar is not implemented at this time.");
-        return PyStatic.NewNone();
+    // VEV_FLEET_W2 (docs/Plan - Fleets (architecture).md Wave 2, staged
+    // 2026-06-11): warp to a character's active ship. Resolve via the live
+    // Client* when one exists; otherwise fall back to chrCharacters.shipID
+    // from the DB, which also covers 2D phantom pilots (no Client*).
+        Client* tClient = sEntityList.FindClientByCharID(toID);
+        if (tClient != nullptr and tClient->GetShipSE() != nullptr
+            and tClient->GetSystemID() == pSystem->GetID()) {
+            pSE = tClient->GetShipSE();
+        } else {
+            DBQueryResult cres;
+            DBResultRow crow;
+            uint32 tShipID(0);
+            if (sDatabase.RunQuery(cres,
+                "SELECT shipID FROM chrCharacters WHERE characterID = %u", toID)
+                and cres.GetRow(crow))
+                tShipID = crow.GetUInt(0);
+            if (tShipID != 0)
+                pSE = pSystem->GetSE(tShipID);
+            if (pSE == nullptr) {
+                call.client->SendErrorMsg("That pilot is not on grid in this system.");
+                return PyStatic.NewNone();
+            }
+        }
     } else {
         sLog.Error( "BeyonceService::Handle_WarpToStuff()", "Unexpected type value: '%s'.", type->content().c_str() );
         return PyStatic.NewNone();

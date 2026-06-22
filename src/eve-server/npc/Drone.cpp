@@ -116,6 +116,23 @@ void DroneSE::SetOwner(Client* pClient) {
 void DroneSE::Process() {
     if (m_killed)
         return;
+
+    // VEV_DRONE_ORPHAN: re-resolve the controlling ship by its STABLE SE id (m_controllerID)
+    // each tick. The owner back-pointers (m_pShipSE, AI m_assignedShip) DANGLE if the ship
+    // jumped / logged out / died -> the AI would deref freed memory (DroneSE::Process UAF, a
+    // shared-server crash class). Gone from this system -> Offline() (inert, no deref); present
+    // -> refresh the live pointers so the AI never touches stale memory. Defense in depth:
+    // jump_cleanup prevents NEW orphans at the jump; this survives orphans from ANY source.
+    if (m_online && m_controllerID != 0) {
+        SystemEntity* owner = (m_system != nullptr) ? m_system->GetSE(m_controllerID) : nullptr;
+        if (owner == nullptr) {
+            Offline();   // controller gone -> stop + AssignShip(nullptr) + m_online=false
+        } else {
+            m_pShipSE = owner;                              // refresh (defensive)
+            if (m_AI != nullptr) m_AI->AssignShip(owner);  // keep the AI's owner ref live
+        }
+    }
+
     double profileStartTime(GetTimeUSeconds());
 
     /*  Enable base call to Process Targeting and Movement  */
@@ -139,7 +156,7 @@ void DroneSE::RemoveDrone() {
     delete this;
 }
 
-void DroneSE::Launch(ShipSE* pShipSE) {
+void DroneSE::Launch(SystemEntity* pShipSE) {  // VEV_DRONE: was ShipSE*
     m_pShipSE = pShipSE;
 
     m_controllerID = pShipSE->GetID();
@@ -147,10 +164,18 @@ void DroneSE::Launch(ShipSE* pShipSE) {
 
     m_system->AddEntity(this);
 
-    assert (m_bubble != nullptr);
+    // VEV_DRONE_BUBBLE_GUARD 2026-06-20: an AI pilot can issue launch_drones while its controller
+    // ship is not attached to a SystemBubble (mid-warp / post-restart not-in-space ghost). The old
+    // assert(m_bubble != nullptr) then abort()ed the WHOLE shared server (SIGABRT) -> docker restart
+    // loop that wiped the anomaly world. Fail the launch cleanly (gate every AI-reachable deref).
+    if (m_bubble == nullptr) {
+        _log(DRONE__TRACE, "DroneSE::Launch: controller %u not in a bubble - launch aborted, drone removed", m_controllerID);
+        m_system->RemoveEntity(this);
+        return;
+    }
 }
 
-void DroneSE::Online(ShipSE* pShipSE/*nullptr*/) {
+void DroneSE::Online(SystemEntity* pShipSE/*nullptr*/) {  // VEV_DRONE
     m_online = true;
     StateChange();
 
@@ -168,11 +193,11 @@ void DroneSE::Offline() {
     StateChange();
 }
 
-void DroneSE::IdleOrbit(ShipSE* pShipSE/*nullptr*/) {
+void DroneSE::IdleOrbit(SystemEntity* pShipSE/*nullptr*/) {  // VEV_DRONE
     if (pShipSE == nullptr)
         pShipSE = m_pShipSE;
 
-    if (!m_online)
+    if (!m_online || m_bubble == nullptr)   // VEV_DRONE_BUBBLE_GUARD2_IDLEORBIT 2026-06-20: don't orbit a bubble-less (failed-launch) drone
         return;         // error here?
 
     // TODO:  fix these speeds
@@ -202,6 +227,11 @@ void DroneSE::Abandon() {
  */
 
 void DroneSE::StateChange() {
+    // VEV_DRONE_BUBBLE_GUARD2_STATECHANGE 2026-06-20 (gdb-confirmed): a not-in-space drone
+    // (failed launch / mid-warp controller) has no bubble; both branches below deref
+    // m_bubble->BubblecastDestinyUpdate (Drone.cpp:242 + :256) -> SIGSEGV the shared server.
+    if (m_bubble == nullptr)
+        return;
     //OnDroneStateChange(droneID, ownerID, controllerID, activityState, droneTypeID, controllerOwnerID, targetID)
     if (m_online) {
         OnDroneStateChange du;

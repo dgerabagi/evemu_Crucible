@@ -16,6 +16,8 @@
 
 #include "eve-server.h"
 
+#include <algorithm>        // VEV_EWAR_MULTI: std::remove_if over the per-ship beam list
+
 #include "GridStreamer.h"   // vev-gateway (on eve-server's include path per CMake)
 #include "GridSession.h"    // vev-gateway
 
@@ -106,13 +108,33 @@ std::unordered_map<uint32_t, RecentFire>& recentWeaponFire() {
 }
 constexpr int64_t kWeaponFireWindowMs = 8000;  // a few weapon cycles; refreshed per shot
 
-// VEV_EWAR_FIRE: SEPARATE per-ship slot for EWAR/utility beams (web/painter/scram
-// /reps) so they never compete with weapon tracers for one field (curator 2026-
-// 06-16). Twin of recentWeaponFire; NoteWeaponFire routes by the module group id.
-std::unordered_map<uint32_t, RecentFire>& recentEwarFire() {
-    static std::unordered_map<uint32_t, RecentFire> m;
+// VEV_EWAR_FIRE: per-ship set of EWAR/utility beams (web/painter/scram/reps) so
+// they never compete with weapon tracers for one field (curator 2026-06-16).
+// VEV_EWAR_MULTI: a LIST per ship (one RecentFire per module group) so a ship
+// running a web AND a painter shows BOTH beams — a single slot let the painter
+// (last writer) clobber the web every tick ("no stasis webifier", reported 4x).
+std::unordered_map<uint32_t, std::vector<RecentFire>>& recentEwarFire() {
+    static std::unordered_map<uint32_t, std::vector<RecentFire>> m;
     return m;
 }
+
+// VEV_MODULE_ACTIVE: recently-activated SELF/TOGGLE modules (reps/hardeners/AB/DCU)
+// that have no target beam -> the CCTV pulses the slot. typeID+groupID, ~10s window
+// (refreshed per cycle / re-affirm). targetID field unused (0).
+std::unordered_map<uint32_t, std::vector<RecentFire>>& recentSelfModule() {
+    static std::unordered_map<uint32_t, std::vector<RecentFire>> m;
+    return m;
+}
+constexpr int64_t kSelfModuleWindowMs = 10000;
+
+// VEV_GATE_FIRE: recent stargate jumps, keyed by GATE itemID -> server ms of the jump,
+// held briefly so every 2D client + the CCTV flash the gate. Twin of recentMining.
+std::unordered_map<uint32_t, int64_t>& recentGateFire() {
+    static std::unordered_map<uint32_t, int64_t> m;  // gateID -> firedAtMs
+    return m;
+}
+constexpr int64_t kGateFireWindowMs = 3000;
+constexpr int64_t kGateJumpChoreoMs = 5000;  // VEV_GATE_CHOREO: dest gate fires ~5s after the source
 
 // VEV_REANCHOR_LOGIC: nearest anchorable celestial (station/gate/planet/moon)
 // to a 2D point, scanning the system's live entity map (already main-thread-
@@ -276,6 +298,15 @@ void StreamGridsTick() {
             e.name    = se->GetName() ? se->GetName() : "";
             e.pos     = { localX, localZ };
             e.radius  = se->GetRadius();
+            // VEV_GATE_FIRE: a stargate recently jumped-through -> flash it on every client.
+            if (std::string(kind) == "stargate") {
+                auto itG = recentGateFire().find((uint32_t)se->GetID());
+                if (itG != recentGateFire().end()) {
+                    const int64_t gfAge = nowMs() - itG->second;  // VEV_GATE_CHOREO
+                    if (gfAge >= 0 && gfAge < kGateFireWindowMs) e.gateFiringMs = (double)itG->second;
+                    else if (gfAge >= kGateFireWindowMs) recentGateFire().erase(itG);
+                }
+            }
 
             DestinyManager* dm = se->DestinyMgr();
             if (dm != nullptr) {
@@ -298,6 +329,34 @@ void StreamGridsTick() {
             if (se->IsShipSE() || se->IsAIShipSE()) {
                 e.ownerCharacterId = se->GetOwnerID();
                 e.travelMode = (dm != nullptr && dm->IsWarping()) ? "warp" : "subwarp";
+                // VEV_WARP_HUD: serialize warp telemetry + gate cloak so the CCTV
+                // observer can render the real warp readout (speed/distance/ETA) + cloak.
+                if (dm != nullptr && dm->IsWarping()) {
+                    SerializedWarpState ws;
+                    GPoint wd = dm->GetWarpDest();
+                    // target PROJECTED to grid-local (same frame as e.pos = p - originPos)
+                    ws.target = { wd.x - originPos.x, wd.z - originPos.z };
+                    const GVector& wv = dm->GetVelocity();
+                    ws.speedMs = std::sqrt(wv.x*wv.x + wv.y*wv.y + wv.z*wv.z);
+                    double total = dm->GetWarpTotalDist();
+                    double remain = se->GetPosition().distance(wd);  // system coords -> frame-free
+                    ws.distanceRemainingM = remain;
+                    ws.warpSpeedMs = dm->GetWarpSpeedMs();
+                    ws.etaS = dm->GetWarpRemainingS();  // VEV_WARP_ETA: real remaining warp time
+                    double pf = (total > 1.0) ? (total - remain) / total : 0.0;
+                    if (pf < 0.0) pf = 0.0; if (pf > 1.0) pf = 1.0;
+                    ws.progressFrac = pf;
+                    ws.alignProgressFrac = 1.0;
+                    ws.phase = (pf < 0.12) ? "accelerate" : (pf > 0.88) ? "decelerate" : "cruise";
+                    e.warp = ws;
+                }
+                if (dm != nullptr && dm->IsCloaked()) e.cloaked = true;
+                // VEV_JUMP_GRACE: jump invuln (SE-side) + gate-cloak countdown for the CCTV
+                if (se->IsInvul()) e.invuln = true;
+                if (AIShipSE* aiSE = se->GetAIShipSE()) {
+                    double cr = aiSE->GetCloakRemainingMs();
+                    if (cr > 0.0) e.cloakRemainingMs = cr;
+                }
                 // VEV_MINING_WARP_CLEAR: entering warp drops all active modules
                 // (EVE) -- wipe the recent-mining beam so it doesn't linger in/after warp.
                 if (dm != nullptr && dm->IsWarping()) recentMining().erase((uint32_t)se->GetID());
@@ -386,11 +445,33 @@ void StreamGridsTick() {
                     }
                     auto itE = recentEwarFire().find(sidW);
                     if (itE != recentEwarFire().end()) {
-                        if (itE->second.expiry >= t) {
-                            e.ewarTargetId = std::to_string(itE->second.targetID);
-                            e.ewarTypeId   = itE->second.typeID;
-                            e.ewarGroupId  = itE->second.groupID;
-                        } else recentEwarFire().erase(itE);
+                        auto& beams = itE->second;
+                        // drop expired beams; emit every live one (web + painter…)
+                        beams.erase(std::remove_if(beams.begin(), beams.end(),
+                                    [t](const RecentFire& f){ return f.expiry < t; }),
+                                    beams.end());
+                        if (beams.empty()) {
+                            recentEwarFire().erase(itE);
+                        } else {
+                            e.ewarFx.clear();
+                            for (const auto& f : beams)
+                                e.ewarFx.push_back({ std::to_string(f.targetID), f.groupID, f.typeID });
+                            // PRIMARY (back-compat single field) = first live beam
+                            e.ewarTargetId = std::to_string(beams.front().targetID);
+                            e.ewarTypeId   = beams.front().typeID;
+                            e.ewarGroupId  = beams.front().groupID;
+                        }
+                    }
+                    // VEV_MODULE_ACTIVE: self/toggle modules (reps/hardeners/AB) —
+                    // no beam, surfaced so the CCTV fitting panel pulses the slot.
+                    auto itSM = recentSelfModule().find(sidW);
+                    if (itSM != recentSelfModule().end()) {
+                        auto& mods = itSM->second;
+                        mods.erase(std::remove_if(mods.begin(), mods.end(),
+                                   [t](const RecentFire& f){ return f.expiry < t; }), mods.end());
+                        if (mods.empty()) recentSelfModule().erase(itSM);
+                        else { e.activeModules.clear();
+                               for (auto& f : mods) e.activeModules.push_back({ f.typeID, f.groupID }); }
                     }
                 }
             }
@@ -450,16 +531,27 @@ void StreamGridsTick() {
         for (uint32_t cid : sub.members) {
             AIShipSE* ship = sEntityList.FindAIShip(cid);
             if (ship == nullptr) continue;
-            // Mid-warp = warp tunnel = no grid: skip re-anchoring until warp
-            // ends, so a celestial the ship streaks past inside the bubble
-            // can't cause a one-tick re-anchor flicker before arrival.
-            if (ship->DestinyMgr() != nullptr && ship->DestinyMgr()->IsWarping()) continue;
+            // VEV_WARP_FOLLOW: the observed pilot warps across bubbles off the pinned
+            // source grid -> the CCTV froze on the last accel tick ("488 km/s, 161 Mm,
+            // 0s") while the real (fast) cruise + arrival happened off-grid. The engine
+            // warp is correct + first-class; only the spectator camera couldn't follow.
+            // So during warp, anchor the grid on the SHIP ITSELF (same pattern as the
+            // deep-space VEV_ANCHOR_SELF below) -> the grid follows the warp tunnel and
+            // the live warp block (ramping speed + counting-down ETA) streams the whole
+            // way. Anchoring on the ship (not a celestial) = no mid-warp flicker; the
+            // normal celestial re-anchor resumes on arrival (IsWarping() false).
+            const bool vevWarpFollow = (ship->DestinyMgr() != nullptr && ship->DestinyMgr()->IsWarping());
             SystemManager* shipSm = ship->SystemMgr();
             if (shipSm == nullptr) continue;
             const uint32_t liveSys = shipSm->GetID();
             const GPoint shipPos = ship->GetPosition();
             uint32_t nId = 0; Vec2 nPos; std::string nName; double nWarpR = 0.0;
-            if (!nearestAnchor(shipSm, shipPos, nId, nPos, nName, nWarpR)) continue;
+            if (vevWarpFollow) {
+                nId = ship->GetID(); nPos = { shipPos.x, shipPos.z };
+                nWarpR = kGridRadiusM; nName = ship->GetName() ? ship->GetName() : "";
+            } else if (!nearestAnchor(shipSm, shipPos, nId, nPos, nName, nWarpR)) {
+                continue;
+            }
             // Is the nearest celestial/beacon within its warp-in bubble? (Checked BEFORE
             // gridChanged so a pilot drifting OFF its current anchor's bubble -- which
             // keeps the same nearest celestial, so gridChanged would be false -- still
@@ -496,6 +588,23 @@ void NoteMining(uint32_t shipID, uint32_t targetID) {
     recentMining()[shipID] = { targetID, nowMs() + kMiningBeamWindowMs };
 }
 
+// VEV_GATE_FIRE: a ship jumped -- flash BOTH the source gate (as it leaves) and the
+// destination gate (as it arrives; that grid is the observer's next anchor).
+void NoteGateJump(uint32_t sourceGateID, uint32_t destGateID) {
+    const int64_t now = nowMs();
+    if (sourceGateID) recentGateFire()[sourceGateID] = now;
+    if (destGateID)   recentGateFire()[destGateID]   = now + kGateJumpChoreoMs;  // VEV_GATE_CHOREO
+}
+
+// VEV_MODULE_ACTIVE: record a self/toggle module activation (no target beam).
+void NoteSelfModule(uint32_t shipID, uint32_t moduleTypeID, uint32_t moduleGroupID) {
+    auto& list = recentSelfModule()[shipID];
+    const int64_t exp = nowMs() + kSelfModuleWindowMs;
+    for (auto& r : list)
+        if (r.typeID == moduleTypeID && r.groupID == moduleGroupID) { r.expiry = exp; return; }
+    list.push_back({ 0, moduleTypeID, moduleGroupID, exp });
+}
+
 // Module groups that are UTILITY/EWAR (web/scram/ECM/painter + remote reps/energy
 // transfer). They call NoteWeaponFire to draw their own beam, but the per-ship
 // fire record has ONE slot, so every cycle they CLOBBERED a real weapon's tracer
@@ -522,8 +631,19 @@ void NoteWeaponFire(uint32_t shipID, uint32_t targetID, uint32_t weaponTypeID, u
     // the target painter laser, no gun fire"). The 2D client reads both streams
     // and renders both -- guns AND web AND painter.
     RecentFire rec = { targetID, weaponTypeID, weaponGroupID, nowMs() + kWeaponFireWindowMs };
-    if (isUtilityFireGroup(weaponGroupID)) recentEwarFire()[shipID] = rec;
-    else                                   recentWeaponFire()[shipID] = rec;
+    if (isUtilityFireGroup(weaponGroupID)) {
+        // VEV_EWAR_MULTI: upsert by module group so web (65) and painter (379)
+        // co-exist instead of overwriting each other — refresh the matching
+        // group's expiry, or append a new beam.
+        auto& beams = recentEwarFire()[shipID];
+        bool found = false;
+        for (auto& f : beams) {
+            if (f.groupID == weaponGroupID) { f = rec; found = true; break; }
+        }
+        if (!found) beams.push_back(rec);
+    } else {
+        recentWeaponFire()[shipID] = rec;
+    }
 }
 
 // VEV_SIM_PAINTER registry (targetID -> {sigMult, expiry}).

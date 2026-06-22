@@ -42,6 +42,7 @@
  */
 class Client;
 class GenericModule;
+struct FactionData;  // VEV_DRONE
 
 class ShipItem
 : public InventoryItem
@@ -367,6 +368,10 @@ public:
 
     void AbandonDrones();
     bool LaunchDrone(InventoryItemRef dRef);
+    bool LaunchDrone(InventoryItemRef dRef, const FactionData& data);  // VEV_DRONE: Client*-free
+    uint8 LaunchAllDrones(const FactionData& data);  // VEV_DRONE: launch full bay; returns count
+    void EngageDrones(SystemEntity* pTarget);  // VEV_DRONE: all launched drones target pTarget
+    void ReturnAllDrones();  // VEV_DRONE: scoop all launched drones to bay
     void ScoopDrone(SystemEntity* pSE);
     // returns current count of drones in space for this ship
     uint8 DroneCount()                                  { return m_drones.size(); }

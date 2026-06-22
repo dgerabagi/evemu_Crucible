@@ -65,7 +65,8 @@
 #include "station/StationDataMgr.h" // See A321 §11.1 — Station dock/undock position data
 #include "inventory/Inventory.h"    // See A321 §4.5 — Inventory access for mining ore extraction
 #include "station/ReprocessingDB.h"   // See A331 §3.5 — Ore reprocessing primitives
-#include "account/AccountService.h"   // See A331 §3.5 — Market transaction ISK transfers
+#include "account/AccountService.h"
+#include "account/AccountDB.h"   // See A331 §3.5 — Market transaction ISK transfers
 #include "system/Damage.h"            // See A371 §9 — AI weapon activation (direct damage pattern)
 
 EntityList::EntityList()
@@ -104,8 +105,8 @@ void EntityList::Initialize() {
     m_targTimer.Start(250);     // testing targeting and scan probes at 4/sec
     m_stampTimer.Start(1000);   // 1hz tic timer
     m_minuteTimer.Start(60000); // does this need to be accurate?
-    m_aiCmdTimer.Start(5000);   // See A321 §4.6 — AI command queue poll every 5s
-    sLog.Cyan("   AICommandQueue", "Timer started — polling every 5s.");
+    m_aiCmdTimer.Start(500);   // VEV 2026-06-19: 5000->500ms for responsive AI combat (drones/repairs/warp-outs were ~5s/verb)
+    sLog.Cyan("   AICommandQueue", "Timer started — polling every 0.5s.");
 
     m_clientSeedID = ServiceDB::SetClientSeed();
     sLog.Green( "       ServerInit", "ClientSeed Initialized." );
@@ -217,6 +218,17 @@ void EntityList::RemoveGuestFromAllStations(Client* pClient)
             cur.second->RemoveGuest(pClient);
 }
 
+// VEV_PHANTOM_TEARDOWN_SWEEP_DEF (2026-06-20, gdb-confirmed): the phantom twin of the above.
+// A phantom AI char's charID must vanish from EVERY station m_phantomGuests on teardown, else a
+// stale entry survives into a station reload whose tree nodes are freed/reused and the next
+// RemovePhantomGuest.erase() walks a corrupted red-black tree -> SIGSEGV.
+void EntityList::RemovePhantomFromAllStations(uint32 charID)
+{
+    for (auto& cur : m_stations)
+        if (cur.second.get() != nullptr)
+            cur.second->RemovePhantomGuest(charID);
+}
+
 void EntityList::RemovePlayer(Client* pClient)
 {
     if (pClient != nullptr)
@@ -245,6 +257,7 @@ void EntityList::AddPhantomPlayer(uint32 charID)
 void EntityList::RemovePhantomPlayer(uint32 charID)
 {
     m_phantomPlayers.erase(charID);
+    RemovePhantomFromAllStations(charID);   // VEV_PHANTOM_TEARDOWN_SWEEP_CALL: drop this charID from every station guest set
     DBerror err;
     sDatabase.RunQuery(err,
         "UPDATE chrCharacters SET online = 0 WHERE characterID = %u", charID);
@@ -305,6 +318,20 @@ void EntityList::Process() {
                 itr = m_systems.erase(itr);
                 continue;
             } else if (!itr->second->ProcessTic()) {    /* Process each loaded system */
+                // VEV_AISHIP_KEEP_SYSTEM_LOADED (2026-06-21, gdb-confirmed warp_to->GetSE SIGSEGV,
+                // char 90001166 in sys 30003495): SystemActivity()/ProcessTic() decide unload purely on
+                // m_activityTime age and do NOT consult SafeToUnload(); the old code then SafeDelete'd the
+                // SystemManager UNCONDITIONALLY even when UnloadSystem() early-returns because SafeToUnload()
+                // is false (an AIShipSE / POS / colony is still present). That freed the SystemManager + its
+                // m_entities map under a live AI pilot, leaving SystemEntity::m_system dangling -> the next
+                // warp_to -> SystemMgr() (freed-but-non-null; the nullptr check can't catch it) -> GetSE()
+                // on the freed map -> SIGSEGV. Gate the free on SafeToUnload() so an AI-occupied system
+                // stays resident exactly like a human-occupied one (A321 first-class occupant); it unloads
+                // normally once the last occupant leaves and SafeToUnload() becomes true.
+                if (!itr->second->SafeToUnload()) {
+                    ++itr;
+                    continue;
+                }
                 itr->second->UnloadSystem();
                 SafeDelete(itr->second);
                 itr = m_systems.erase(itr);
@@ -939,6 +966,14 @@ static void vevProcessToggleCycles() {
     const int64 nowMs = GetTimeMSeconds();
     for (auto it = s_vevToggleReg.begin(); it != s_vevToggleReg.end(); ) {
         VevToggleState& ts = it->second;
+        // VEV_MODULE_ACTIVE_TOGGLE: re-affirm the engaged toggle every tick so the
+        // CCTV pulses it for as long as it's ON (the cap cycle below only fires every
+        // durationMs > the report window). groupID 0 — the client matches by typeId.
+        {
+            InventoryItemRef mActRef = sItemFactory.GetItemRef(it->first);
+            if (mActRef.get() != nullptr)
+                vev::grid::NoteSelfModule(ts.shipItemID, mActRef->typeID(), 0);
+        }
         if (nowMs < ts.nextCycleMs) { ++it; continue; }
         InventoryItemRef shipRef = sItemFactory.GetItemRef(ts.shipItemID);
         if (shipRef.get() == nullptr) { it = s_vevToggleReg.erase(it); continue; }
@@ -1421,7 +1456,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         if (yPos != std::string::npos) { size_t c = p.find(":", yPos); if (c != std::string::npos) gy = atof(p.c_str() + c + 1); }
         if (zPos != std::string::npos) { size_t c = p.find(":", zPos); if (c != std::string::npos) gz = atof(p.c_str() + c + 1); }
         GPoint target(gx, gy, gz);
-        pAIShip->DestinyMgr()->GotoPoint(target);
+        pAIShip->DestinyMgr()->MoveToPointAndStop(target, 1.0f);   // VEV_APPROACH_BRAKE: decel + stop in range (was GotoPoint -> overshoot)
         resultMsg = "moving to target point";
         return true;
     }
@@ -1657,7 +1692,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             toTarget.normalize();
             dest = myPos + (toTarget * (d - range));   // stop range short of it
         }
-        pAIShip->DestinyMgr()->GotoPoint(dest);
+        pAIShip->DestinyMgr()->MoveToPointAndStop(dest, 1.0f);   // VEV_APPROACH_BRAKE: decel + stop in range (was GotoPoint -> overshoot)
         char buf[80];
         snprintf(buf, sizeof(buf), "approaching target %u to %.0f m (was %.0f m)", targetID, range, d);
         resultMsg = buf;
@@ -1864,7 +1899,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             pAIShip->DestinyMgr()->WarpTo(pStation->GetPosition(), pStation->GetRadius() + 2000.0);  // VEV_DOCKGATE_RADIUS: land just outside the hull, in dock range
             resultMsg = "warping to dock";
         } else {
-            pAIShip->DestinyMgr()->GotoPoint(pStation->GetPosition());
+            pAIShip->DestinyMgr()->MoveToPointAndStop(pStation->GetPosition(), 1.0f);   // VEV_DOCK_BRAKE: decel+stop in dock range -> arrives -> docks (was GotoPoint -> never arrives -> 'dock taking long')
             resultMsg = "approaching to dock";
         }
         return true;
@@ -2350,6 +2385,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         // Send jump-out visual effects to observers in current system
         pAIShip->DestinyMgr()->SendJumpOut(gateID);
         pAIShip->DestinyMgr()->SendGateActivity(gateID);
+        vev::grid::NoteGateJump(gateID, destGateID);  // VEV_GATE_FIRE: light the gate on jump
 
         // Clear targets before jumping
         if (pAIShip->TargetMgr() != nullptr) {
@@ -2358,6 +2394,12 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
 
         // Halt movement
         pAIShip->DestinyMgr()->Halt();
+
+        // VEV_JUMP_CLEANUP: snapshot survivors + tear down in-memory relationships (drones,
+        // applied EWAR) BEFORE the SafeDelete, while pAIShip is valid + still in its OLD system.
+        // Contract (AIShipSE.h): every per-SE member is CLEAN (here) / CARRY (Export-Import) / DERIVE (ctor).
+        AIShipSE::JumpCarry jumpCarry = pAIShip->ExportJumpState();
+        pAIShip->OnPreJumpDestroy();
 
         // Save references we need before destroying old entity
         uint32 shipID = pAIShip->GetSelf()->itemID();
@@ -2428,10 +2470,17 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
 
         // 5. Add to destination system
         pDestSystem->AddEntity(pNewAIShip, false);
-        pNewAIShip->DestinyMgr()->SetPosition(landingPoint);
+        pNewAIShip->DestinyMgr()->SetPosition(landingPoint, true);   // VEV_POSITION_DESYNC: broadcast + force item-store sync so both position stores agree post-jump
 
         // Track in EntityList
         AddAIShip(charID, pNewAIShip);
+
+        // VEV_JUMP_GRACE: arm the post-jump grace suite on the recreated ship — gate cloak
+        // (30s, decloaks on warp) + jump invuln (15s). Without this AI ships arrived uncloaked
+        // and instantly gankable. Mirror of the human path. docs/eve-session-timer-mechanic.md
+        // VEV_JUMP_CLEANUP: restore the carried survivors (dock intent) onto the new SE.
+        pNewAIShip->ImportJumpState(jumpCarry);
+        pNewAIShip->StartJumpGrace();
 
         // 6. Update character DB location
         DBerror err;
@@ -2761,6 +2810,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                         return false;
                     }
                     pTarget->DestinyMgr()->WebbedMe(webModRef, true);
+                    pAIShip->RecordAppliedWeb(targetID, webModRef);   // VEV_JUMP_CLEANUP: reverse on jump
                     pAIShip->DestinyMgr()->SendSpecialEffect(
                         pAIShip->GetID(), moduleID, moduleTypeID, targetID, 0,
                         "effects.StasisWeb", 1, 1, 1, 0, 0, 0);
@@ -2783,6 +2833,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                         return false;
                     }
                     tgtSelf->SetAttribute(AttrWarpScrambleStatus, 1);
+                    pAIShip->RecordAppliedScram(targetID);            // VEV_JUMP_CLEANUP: reverse on jump
                     pAIShip->DestinyMgr()->SendSpecialEffect(
                         pAIShip->GetID(), moduleID, moduleTypeID, targetID, 0,
                         "effects.WarpScramble", 1, 1, 1, 0, 0, 0);
@@ -3239,6 +3290,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                         char tbuf[200];
                         snprintf(tbuf, sizeof(tbuf), "%s engaged: max velocity %.0f -> %.0f m/s",
                                  moduleName.c_str(), vMax, vMax * (1.0f + boost));
+                        vev::grid::NoteSelfModule(pAIShip->GetID(), moduleTypeID, moduleGroupID);  // VEV_MODULE_ACTIVE
                         sLog.Cyan("activate_module", "TOGGLE-ON char=%u %s", charID, tbuf);
                         resultMsg = tbuf;
                         return true;
@@ -3301,6 +3353,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                     }
                     char rbuf2[200];
                     snprintf(rbuf2, sizeof(rbuf2), "%s engaged: %d resistance layers hardened", moduleName.c_str(), appliedRes);
+                    vev::grid::NoteSelfModule(pAIShip->GetID(), moduleTypeID, moduleGroupID);  // VEV_MODULE_ACTIVE
                     sLog.Cyan("activate_module", "TOGGLE-ON char=%u %s", charID, rbuf2);
                     resultMsg = rbuf2;
                     return true;
@@ -3347,6 +3400,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                         pAIShip->GetID(), moduleID, moduleTypeID, pAIShip->GetID(), 0,
                         (moduleGroupID == 40) ? "effects.ShieldBoosting" : "effects.ArmorRepair",
                         1, 1, 1, 0, 0, 0);
+                    vev::grid::NoteSelfModule(pAIShip->GetID(), moduleTypeID, moduleGroupID);  // VEV_MODULE_ACTIVE
                     sLog.Cyan("activate_module", "SELFREP char=%u %s: %s", charID, moduleName.c_str(), rbuf);
                     resultMsg = rbuf;
                     return true;
@@ -4107,6 +4161,10 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
     // Presence: online + Local (no station guest, they're in space). Idempotent:
     // an existing ball is repositioned + re-warped, not duplicated.
     if (cmd == "login_in_space") {
+        // VEV_LOGIN_INSPACE_NOOP: an already-in-space pilot must NOT be re-spawned /
+        // repositioned — a redundant grid:enter (client reconnect) would teleport the
+        // ship to a stale saved position near the station (and blank the client cargo).
+        if (HasAIShip(charID)) { resultMsg = "already in space"; return true; }
         vevRecalcPassives(charID);   // VEV_SIM_PASSIVES: apply fitted passives before the spawn reads attrs
         DBQueryResult charRes;
         if (!sDatabase.RunQuery(charRes,
@@ -4495,11 +4553,29 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                 vevCap = (cCap > 0) ? (cChg / cCap * 100.0f) : 0.0f;
             }
         }
+        // VEV_NAV_TELEM: target-relative motion. closing>0 = approaching the commanded
+        // target, closing<0 = receding (overshoot / orbit). Braking moves track
+        // m_arrivalPoint; a bare goto tracks m_targetPoint. distTgt=-1 => no command.
+        double vevDistTgt = -1.0, vevClosing = 0.0;
+        {
+            DestinyManager* vevDM = pAIShip->DestinyMgr();
+            if (vevDM != nullptr) {
+                bool vevHasTgt = false; GPoint vevTgt;
+                if (vevDM->IsArrivalStop()) { vevTgt = vevDM->GetArrivalPoint(); vevHasTgt = true; }
+                else if (vevDM->IsGoto())   { vevTgt = vevDM->GetTargetPoint(); vevHasTgt = true; }
+                if (vevHasTgt) {
+                    double dx = vevTgt.x - pos.x, dy = vevTgt.y - pos.y, dz = vevTgt.z - pos.z;
+                    vevDistTgt = sqrt(dx*dx + dy*dy + dz*dz);
+                    const GVector& vevVel = vevDM->GetVelocity();
+                    if (vevDistTgt > 1.0) vevClosing = (dx*vevVel.x + dy*vevVel.y + dz*vevVel.z) / vevDistTgt;
+                }
+            }
+        }
         char buf[512];
         snprintf(buf, sizeof(buf),
-            "pos=(%.0f, %.0f, %.0f) speed=%.1f state=%s bubble=%u isBelt=%s sh=%.0f ar=%.0f hu=%.0f cap=%.0f",
+            "pos=(%.0f, %.0f, %.0f) speed=%.1f state=%s bubble=%u isBelt=%s sh=%.0f ar=%.0f hu=%.0f cap=%.0f distTgt=%.0f closing=%.1f",
             pos.x, pos.y, pos.z, speed, stateName, bubbleID, isBelt ? "yes" : "no",
-            vevSh, vevAr, vevHu, vevCap);
+            vevSh, vevAr, vevHu, vevCap, vevDistTgt, vevClosing);
         resultMsg = buf;
         return true;
     }
@@ -4839,6 +4915,11 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             EVEItemFlags targetFlag = flagCargoHold;
             if (toTarget == "ore_hold")
                 targetFlag = flagOreHold;
+            // VEV_CCHOLD: a Command Center (groupID 1027) rides the ship's dedicated
+            // Command Center Hold (flagCommandCenterHold), not the ~100 m3 regular cargo
+            // — EVE-real (the Primae has a 2000 m3 CC hold; a CC is 1000 m3). Auto-route
+            // it like the 3D client does, so a hauler's move_item('cargo') fits the CC.
+            if (iRef->groupID() == 1027) targetFlag = flagCommandCenterHold;  // VEV_CCHOLD2: the item's OWN group (GetType can be null for an unpreloaded type)
 
             InventoryItemRef shipRef = sItemFactory.GetItemRef(shipID);
             if (shipRef.get() == nullptr) {
@@ -4856,7 +4937,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             float itemVol = iRef->HasAttribute(AttrVolume) ? iRef->GetAttribute(AttrVolume).get_float() * iRef->quantity() : 0.0f;
             if (itemVol > remaining) {
                 char buf[128];
-                snprintf(buf, sizeof(buf), "not enough space: need %.0f, have %.0f", itemVol, remaining);
+                snprintf(buf, sizeof(buf), "not enough space in hold %u: need %.0f, have %.0f", (unsigned)targetFlag, itemVol, remaining);
                 resultMsg = buf;
                 return false;
             }
@@ -5028,15 +5109,17 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         uint32 ccItemID = 0;
         bool fromCustoms = spec.value("fromCustoms", 0) != 0;   // VEV_POCO1: real ferry vs spawn-teleport
         if (fromCustoms) {
-            // consume the command center the logi pilot delivered to the planet's customs office.
-            uint32 coID = 0;
-            { DBQueryResult cr; DBResultRow crow; if (sDatabase.RunQuery(cr, "SELECT e.itemID FROM entity e JOIN invTypes t ON t.typeID=e.typeID WHERE t.groupID=1025 AND e.customInfo='%u' LIMIT 1", planetID) && cr.GetRow(crow)) coID = crow.GetUInt(0); }
-            if (coID == 0) { resultMsg = "pi_commit_spec: no customs office at this planet (deliver via the CO)"; return false; }
-            { DBQueryResult ir; DBResultRow irow; if (sDatabase.RunQuery(ir, "SELECT itemID FROM entity WHERE locationID=%u AND ownerID=%u AND typeID=%u LIMIT 1", coID, charID, ccTypeID) && ir.GetRow(irow)) ccItemID = irow.GetUInt(0); }
-            if (ccItemID == 0) { resultMsg = "pi_commit_spec: command center not yet delivered to the customs office"; return false; }
+            // VEV_CCSHIP: the hauler flew the CC here in its Command Center Hold — launch it
+            // STRAIGHT to the planet surface. A customs office (POCO, groupID 1025 Orbital
+            // Infrastructure) is a TAX GATE, not an item container: Move-into-the-CO hangs the
+            // command (live-fired 2026-06-19). EVE-real: you place the CC on the planet from cargo.
+            uint32 shipID = 0;
+            { DBQueryResult sr; DBResultRow srow; if (sDatabase.RunQuery(sr, "SELECT shipID FROM chrCharacters WHERE characterID=%u", charID) && sr.GetRow(srow)) shipID = srow.GetUInt(0); }
+            { DBQueryResult ir; DBResultRow irow; if (sDatabase.RunQuery(ir, "SELECT itemID FROM entity WHERE ownerID=%u AND typeID=%u AND locationID=%u AND flag IN (5,148) LIMIT 1", charID, ccTypeID, shipID) && ir.GetRow(irow)) ccItemID = irow.GetUInt(0); }
+            if (ccItemID == 0) { resultMsg = "pi_commit_spec: command center not aboard the ship (haul it here in the CC hold)"; return false; }
             InventoryItemRef ccRef = sItemFactory.GetItemRef(ccItemID);
             if (ccRef.get() == nullptr) { resultMsg = "pi_commit_spec: CC item missing"; return false; }
-            ccRef->Move(planetID, flagNone, true);   // CO hangar -> planet surface
+            ccRef->Move(planetID, flagNone, true);   // ship CC hold -> planet surface (launch)
         } else {
             ItemData ccData(ccTypeID, charID, planetID, flagNone, 1);
             InventoryItemRef ccRef = sItemFactory.SpawnItem(ccData);
@@ -5261,8 +5344,9 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
     if (cmd == "pi_haul_export") {
         std::string p(params);
         auto rdU = [&p](const char* k) -> uint32 { size_t kp=p.find(k); if(kp==std::string::npos) return 0; size_t c=p.find(":",kp); return (c==std::string::npos)?0:(uint32)atol(p.c_str()+c+1); };
-        uint32 systemID=rdU("\"systemID\""), planetID=rdU("\"planetID\""), hubStationID=rdU("\"hubStationID\"");
-        if (systemID==0||planetID==0||hubStationID==0) { resultMsg="pi_haul_export needs systemID, planetID, hubStationID"; return false; }
+        uint32 systemID=rdU("\"systemID\""), planetID=rdU("\"planetID\""), hubStationID=rdU("\"hubStationID\""), toCargo=rdU("\"to_cargo\"");  // VEV_PIEXPORT
+        if (systemID==0||planetID==0) { resultMsg="pi_haul_export needs systemID, planetID"; return false; }
+        if (!toCargo && hubStationID==0) { resultMsg="pi_haul_export needs hubStationID (or to_cargo:1 to pull into the ship PI hold)"; return false; }
         SystemManager* pSM=FindOrBootSystem(systemID);
         if(!pSM){resultMsg="pi_haul_export: system not found";return false;}
         SystemEntity* pSE=pSM->GetSE(planetID);
@@ -5272,7 +5356,14 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         Colony* colony=pPlanet->GetColony(charID);
         if(!colony->HasColony()){resultMsg="pi_haul_export: no colony here";return false;}
         double value=0, tax=0; int count=0; std::string manifest;
-        colony->HaulExport(hubStationID, value, tax, count, manifest);
+        if (toCargo) {   // VEV_PIEXPORT: pull products into the hauler's Planetary Commodities Hold (real export-to-cargo, no teleport)
+            uint32 shipID=0;
+            { DBQueryResult sr; DBResultRow srow; if (sDatabase.RunQuery(sr,"SELECT shipID FROM chrCharacters WHERE characterID=%u",charID) && sr.GetRow(srow)) shipID=srow.GetUInt(0); }
+            if (shipID==0) { resultMsg="pi_haul_export: to_cargo but no active ship"; return false; }
+            colony->HaulExport(shipID, flagPlanetaryCommoditiesHold, value, tax, count, manifest);
+        } else {
+            colony->HaulExport(hubStationID, flagHangar, value, tax, count, manifest);
+        }
         if (count == 0) { resultMsg="pi_haul_export: nothing in storage/launchpad to haul"; return true; }
         DBerror err;
         sDatabase.RunQuery(err, "UPDATE chrCharacters SET balance = GREATEST(0, balance - %f) WHERE characterID = %u", tax, charID);
@@ -5326,7 +5417,7 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             uint32 shipID=0;
             { DBQueryResult sr; DBResultRow srow; if (sDatabase.RunQuery(sr,"SELECT shipID FROM chrCharacters WHERE characterID=%u",charID) && sr.GetRow(srow)) shipID=srow.GetUInt(0); }
             uint32 cargoItem=0;
-            { DBQueryResult ir; DBResultRow irow; if (sDatabase.RunQuery(ir,"SELECT itemID FROM entity WHERE ownerID=%u AND typeID=%u AND locationID=%u AND flag=%d LIMIT 1",charID,typeID,shipID,(int)flagCargoHold) && ir.GetRow(irow)) cargoItem=irow.GetUInt(0); }
+            { DBQueryResult ir; DBResultRow irow; if (sDatabase.RunQuery(ir,"SELECT itemID FROM entity WHERE ownerID=%u AND typeID=%u AND locationID=%u AND flag IN (%d,%d) LIMIT 1",charID,typeID,shipID,(int)flagCargoHold,(int)flagCommandCenterHold) && ir.GetRow(irow)) cargoItem=irow.GetUInt(0); }  // VEV_CCHOLD: a CC rides the Command Center Hold (148), not regular cargo
             if (cargoItem==0){resultMsg="pi_deposit_customs: that item is not in your ship cargo (fly it here first)";return false;}
             InventoryItemRef cRef=sItemFactory.GetItemRef(cargoItem);
             if (cRef.get()==nullptr){resultMsg="pi_deposit_customs: cargo item not loaded";return false;}
@@ -6341,6 +6432,145 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
     // + StandingDB are not in EntityList.cpp's include scope. Skill/standing discounts are
     // forgone in favor of a Client-less surgical bridge; AI pilots pay slightly more, which
     // is acceptable for the staging bridge.
+    // ── place_sell_order (market final-mile, 2026-06-20) ──────────────────────────
+    // A REAL CORP sell order: clones create_sell_order but lists from the CORP hangar
+    // (flagCorpMarket=62), charges the Crucible 1%/floor-100 broker fee from the corp wallet
+    // (accountKey 1000) to the station owner, isCorp=true, duration default 14, range Station(-1).
+    // Replaces the faked Python mktOrders INSERTs (no fee, duration=365, orderRange=0).
+    if (cmd == "place_sell_order") {
+        if (!IsPhantomPlayer(charID)) {
+            resultMsg = "must be docked to place sell order";
+            return false;
+        }
+        DBQueryResult cRes;
+        if (!sDatabase.RunQuery(cRes,
+            "SELECT stationID, corporationID FROM chrCharacters WHERE characterID = %u", charID)) {
+            resultMsg = "failed to query character";
+            return false;
+        }
+        DBResultRow cRow;
+        if (!cRes.GetRow(cRow)) { resultMsg = "character not found"; return false; }
+        uint32 dockedStationID = cRow.GetUInt(0);
+        uint32 corpID = cRow.GetUInt(1);
+        if (dockedStationID == 0) { resultMsg = "not docked"; return false; }
+        if (corpID == 0) { resultMsg = "no corporation"; return false; }
+
+        std::string sp(params);
+        uint32 typeID = 0;
+        { size_t t = sp.find("\"type_id\""); if (t != std::string::npos) { size_t c = sp.find(":", t); if (c != std::string::npos) typeID = (uint32)atol(sp.c_str() + c + 1); } }
+        if (typeID == 0) { resultMsg = "params require {type_id, quantity, price}"; return false; }
+        uint32 quantity = 0;
+        { size_t q = sp.find("\"quantity\""); if (q != std::string::npos) { size_t c = sp.find(":", q); if (c != std::string::npos) quantity = (uint32)atol(sp.c_str() + c + 1); } }
+        if (quantity == 0) { resultMsg = "params require {type_id, quantity, price}"; return false; }
+        double price = 0.0;
+        { size_t pp = sp.find("\"price\""); if (pp != std::string::npos) { size_t c = sp.find(":", pp); if (c != std::string::npos) price = atof(sp.c_str() + c + 1); } }
+        if (price <= 0.0) { resultMsg = "params require price>0"; return false; }
+        uint32 stationID = dockedStationID;
+        { size_t s = sp.find("\"station_id\""); if (s != std::string::npos) { size_t c = sp.find(":", s); if (c != std::string::npos) { uint32 sv = (uint32)atol(sp.c_str() + c + 1); if (sv != 0) stationID = sv; } } }
+        uint32 durationDays = 14;
+        { size_t d = sp.find("\"duration_days\""); if (d != std::string::npos) { size_t c = sp.find(":", d); if (c != std::string::npos) { uint32 dv = (uint32)atol(sp.c_str() + c + 1); if (dv >= 1 && dv <= 90) durationDays = dv; } } }
+        uint32 minVolume = 1;
+        { size_t m = sp.find("\"min_volume\""); if (m != std::string::npos) { size_t c = sp.find(":", m); if (c != std::string::npos) { uint32 mv = (uint32)atol(sp.c_str() + c + 1); if (mv >= 1) minVolume = mv; } } }
+        int16 orderRange = -1;
+        { size_t r = sp.find("\"range\""); if (r != std::string::npos) { size_t c = sp.find(":", r); if (c != std::string::npos) orderRange = (int16)atol(sp.c_str() + c + 1); } }
+
+        if (stationID != dockedStationID) {
+            resultMsg = "sell order station_id must equal docked stationID for phantom pilots";
+            return false;
+        }
+
+        // locate the stack in the corp hangar: flag 4 (flagHangar), owned by the CORP or by the
+        // placing MEMBER who built/hauled it. (The vev corp-goods convention is ownerID=corp/char
+        // at flag 4, NOT flagCorpMarket=62 — verified: DXG goods live at flag 4.) The order placed
+        // is always a CORP order regardless of which of the two owns the source stack.
+        DBQueryResult fRes;
+        if (!sDatabase.RunQuery(fRes,
+            "SELECT itemID FROM entity WHERE locationID = %u AND ownerID IN (%u, %u)"
+            " AND flag = %u AND typeID = %u AND quantity >= %u LIMIT 1",
+            stationID, corpID, charID, (uint32)flagHangar, typeID, quantity)) {
+            resultMsg = "failed to search corp hangar";
+            return false;
+        }
+        DBResultRow fRow;
+        if (!fRes.GetRow(fRow)) {
+            resultMsg = "no matching item in the corp hangar with sufficient quantity";
+            return false;
+        }
+        uint32 itemID = fRow.GetUInt(0);
+        InventoryItemRef iRef = sItemFactory.GetItemRef(itemID);
+        if (iRef.get() == nullptr) { resultMsg = "item disappeared before listing"; return false; }
+
+        // Crucible broker fee = max(1% of order value, 100 ISK), from the corp wallet (key 1000)
+        double money = price * (double)quantity;
+        double fee = money * 0.01;
+        if (fee < 100.0) fee = 100.0;
+        double corpBalance = AccountDB::GetCorpBalance(corpID, 1000);
+        if (corpBalance < fee) {
+            char ebuf[200];
+            snprintf(ebuf, sizeof(ebuf),
+                "corp insufficient ISK for broker fee: have %.2f, need %.2f", corpBalance, fee);
+            resultMsg = ebuf;
+            return false;
+        }
+
+        // escrow the corp item (the listed qty leaves the hangar = the order)
+        if (quantity < (uint32)iRef->quantity()) {
+            iRef->AlterQuantity(-(int32)quantity, true);
+        } else {
+            iRef->Delete();
+        }
+
+        Market::SaveData data = Market::SaveData();
+        data.bid           = false;                 // SELL
+        data.isCorp        = true;                  // CORP order
+        data.contraband    = false;
+        data.jumps         = 1;
+        data.orderRange    = orderRange;            // default Station(-1) = buyable only AT this office
+        data.typeID        = (uint16)typeID;
+        data.accountKey    = 1000;                  // corp Cash division
+        data.orderID       = 0;
+        data.ownerID       = corpID;
+        data.regionID      = sDataMgr.GetStationRegion(stationID);
+        data.stationID     = stationID;
+        data.solarSystemID = sDataMgr.GetStationSystem(stationID);
+        data.minVolume     = minVolume;
+        data.volEntered    = quantity;
+        data.volRemaining  = quantity;
+        data.duration      = durationDays;          // default 14 (TwoWeeks), valid Crucible enum
+        data.memberID      = charID;                // the placing Trader
+        data.issued        = GetFileTimeNow();
+        data.price         = (float)price;
+        data.escrow        = 0.0f;                  // sell = no ISK escrow (the item is the escrow)
+
+        uint32 orderID = MarketDB::StoreOrder(data);
+        if (orderID == 0) {
+            resultMsg = "failed to record corp sell order in DB";
+            return false;
+        }
+        sMktMgr.InvalidateOrdersCache(data.regionID, typeID);
+
+        // charge the broker fee from the corp wallet (key 1000) to the station owner
+        uint32 stationOwner = stDataMgr.GetOwnerID(stationID);
+        std::string brokerReason = "DESC:  Setting up corp sell order in ";
+        brokerReason += stDataMgr.GetStationName(stationID);
+        AccountService::TransferFunds(
+            corpID,
+            stationOwner,
+            (float)fee,
+            brokerReason,
+            Journal::EntryType::Brokerfee,
+            orderID,
+            (uint32)1000
+        );
+
+        char obuf[256];
+        snprintf(obuf, sizeof(obuf),
+            "corp sell order %u placed: %u x type %u @ %.2f (broker fee %.2f)",
+            orderID, quantity, typeID, price, fee);
+        resultMsg = obuf;
+        return true;
+    }
+
     if (cmd == "create_buy_order") {
         if (!IsPhantomPlayer(charID)) {
             resultMsg = "must be docked to place buy order";
@@ -7091,6 +7321,10 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         uint32 moduleID = 0;
         size_t mPos = p.find("\"moduleID\"");
         if (mPos != std::string::npos) { size_t c = p.find(":", mPos); if (c != std::string::npos) moduleID = (uint32)atol(p.c_str() + c + 1); }
+        // VEV_XPL_PER_CAN: optional containerID -> hack THIS specific can, loot it, remove
+        // it; the SITE clears only when the last can of the site is gone (no id = whole-site).
+        uint32 vevCanID = 0;
+        { size_t cp = p.find("\"containerID\""); if (cp != std::string::npos) { size_t c = p.find(":", cp); if (c != std::string::npos) vevCanID = (uint32)atol(p.c_str() + c + 1); } }
         // VEV_XPL_FORCE: human 2D-client hacks come pre-decided by the client minigame
         // (the skill check happens there). force=true commits the loot without re-rolling.
         bool vevForce = false;
@@ -7115,12 +7349,41 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             resultMsg = "no Codebreaker/Analyzer (Data Miner) module provided";
             return false;
         }
-        const double hackDist = pAIShip->GetPosition().distance(sigHit.position);
-        if (hackDist > 30000.0) {   // VEV_XPL: must be AT the site (approach the cans), not a 100km range-hack
-            char hbuf2[128];
-            snprintf(hbuf2, sizeof(hbuf2), "too far from site: %.0fm (warp to the signature first)", hackDist);
-            resultMsg = hbuf2;
-            return false;
+        // VEV_XPL_MODULE_TYPE: a Data Codebreaker cannot hack a RELIC site and a Relic
+        // Analyzer cannot hack a DATA site (EVE-real). group 538 holds both lines; the
+        // data line is this typeID set, everything else group-538 is the relic Analyzer.
+        {
+            static const uint32 vevDataMods[] = {22175,22325,22327,22329,22331,22333,22335,22337,22339,3793,3581};
+            const uint32 vevMT = modRef->typeID();
+            bool vevIsDataMod = false;
+            for (size_t vdi = 0; vdi < sizeof(vevDataMods)/sizeof(uint32); ++vdi)
+                if (vevDataMods[vdi] == vevMT) { vevIsDataMod = true; break; }
+            const bool vevNeedData = (sigHit.dungeonType == 4);
+            if (vevNeedData != vevIsDataMod) {
+                resultMsg = vevNeedData ? "Data site — fit a Data Codebreaker, not a Relic Analyzer"
+                                        : "Relic site — fit a Relic Analyzer, not a Data Codebreaker";
+                return false;
+            }
+        }
+        // VEV_XPL_PER_CAN: gate to the targeted CAN (slowboat range) when a containerID is
+        // given, else to the site centre. The can must belong to THIS site (CustomInfo
+        // "livedungeon_<sigItemID>") so you cannot cross-loot another site's cans.
+        SystemEntity* pCanSE = nullptr;
+        const std::string vevCanTag = "livedungeon_" + std::to_string(sigHit.sigItemID);
+        if (vevCanID != 0) {
+            pCanSE = pSystem->GetSE(vevCanID);
+            if (pCanSE == nullptr) { resultMsg = "container not found in system"; return false; }
+            if (pCanSE->GetSelf()->customInfo() != vevCanTag) { resultMsg = "that container is not part of this site"; return false; }
+            const double cd = pAIShip->GetPosition().distance(pCanSE->GetPosition());
+            if (cd > 5000.0) { char b[96]; snprintf(b, sizeof(b), "too far from the can: %.0fm (approach it)", cd); resultMsg = b; return false; }
+        } else {
+            const double hackDist = pAIShip->GetPosition().distance(sigHit.position);
+            if (hackDist > 30000.0) {
+                char hbuf2[128];
+                snprintf(hbuf2, sizeof(hbuf2), "too far from site: %.0fm (warp to the signature first)", hackDist);
+                resultMsg = hbuf2;
+                return false;
+            }
         }
         // VEV_HACK_PROSPECTOR (2026-06-19): 1:1 evemu Crucible roll = Prospector::CheckSuccess
         // (ship/modules/Prospector.cpp:143) -> rand(0,100) < AccessDifficulty(901) +
@@ -7149,10 +7412,13 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         if (hchance > 95) hchance = 95;
         if (hchance < 5)  hchance = 5;
         if (!vevForce && MakeRandomInt(0, 100) >= hchance) {
-            char hfail[128];
-            snprintf(hfail, sizeof(hfail), "hack failed (%d%% chance) - cycle again", hchance);
+            const char* vevSkN = (sigHit.dungeonType == 4) ? "Hacking" : "Archaeology";
+            char hfail[200];
+            snprintf(hfail, sizeof(hfail),
+                "analyzer miss: %d%% coherence [site %d + module +%d + %s L%d +%d]; re-cycling",
+                hchance, vevAccessDifficulty, hbonus, vevSkN, vevSkillLvl, vevSkillLvl * 3);
             resultMsg = hfail;
-            return true;   // a failed roll is still a completed cycle
+            return true;   // a missed roll is still a completed cycle
         }
         // SUCCESS: drop relic/data loot into cargo (data=datacores, relic=salvage mats)
         // VEV_XPL_LOOT_TABLES (2026-06-16): authentic value-weighted relic/data drops
@@ -7175,7 +7441,8 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                                                    : (int)(sizeof(relicTbl)/sizeof(VevLoot));
         int wsum = 0; for (int wi = 0; wi < tblN; ++wi) wsum += tbl[wi].weight;
         const float vevSec = pSystem->GetSystemSecurityRating();
-        int drops = 2 + MakeRandomInt(0, 1) + (vevSec < 0.45f ? 1 : 0) + (vevSec <= 0.0f ? 1 : 0);
+        int drops = (vevCanID != 0) ? (1 + MakeRandomInt(0, 1))
+                  : (2 + MakeRandomInt(0, 1) + (vevSec < 0.45f ? 1 : 0) + (vevSec <= 0.0f ? 1 : 0));
         ShipItemRef hkShip = ShipItemRef::StaticCast(pAIShip->GetSelf());
         Inventory* hkInv = (hkShip.get() != nullptr) ? hkShip->GetMyInventory() : nullptr;
         std::string got;
@@ -7198,10 +7465,26 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                 break;
             }
         }
-        pAM->RemoveSignal(sigHit.sigItemID);   // site consumed
+        // VEV_XPL_PER_CAN: consume THIS can (RemoveEntity -> it vanishes client-side + fixes
+        // the can-leak), then clear the SITE only when no cans of this site remain. Legacy
+        // (no containerID) consumes the whole site in one shot (the AI scan FSM path).
+        bool vevSiteCleared = false;
+        if (vevCanID != 0 && pCanSE != nullptr) {
+            pSystem->RemoveEntity(pCanSE);
+            int vevRemain = 0;
+            for (auto& kv : pSystem->GetEntities()) {
+                SystemEntity* se2 = kv.second;
+                if (se2 != nullptr && se2->GetGroupID() == 306 && se2->GetSelf()->customInfo() == vevCanTag) vevRemain++;
+            }
+            if (vevRemain == 0) { pAM->RemoveSignal(sigHit.sigItemID); vevSiteCleared = true; }
+        } else {
+            pAM->RemoveSignal(sigHit.sigItemID);
+            vevSiteCleared = true;
+        }
         char abuf[320];
-        snprintf(abuf, sizeof(abuf), "%s SUCCESS (%d%%): %d kind(s) -%s site consumed",
-                 (sigHit.dungeonType == 4) ? "data hack" : "relic analyze", hchance, kinds, kinds ? got.c_str() : " nothing;");
+        snprintf(abuf, sizeof(abuf), "%s SUCCESS (%d%%): %d kind(s) -%s %s",
+                 (sigHit.dungeonType == 4) ? "data hack" : "relic analyze", hchance, kinds, kinds ? got.c_str() : " nothing;",
+                 vevSiteCleared ? "site cleared" : "can looted");
         sLog.Cyan("activate_module", "ANALYZE char=%u %s", charID, abuf);
         resultMsg = abuf;
         return true;

@@ -91,6 +91,7 @@ public:
     void AddAIShip(uint32 charID, AIShipSE* pSE)        { m_aiShips[charID] = pSE; }
     void RemoveAIShip(uint32 charID)                     { m_aiShips.erase(charID); }
     AIShipSE* FindAIShip(uint32 charID);
+    bool HasAIShipInSystem(uint32 systemID);   // VEV_ANOM_AI_GATE: AI-only systems spawn cosmic signals
     bool HasAIShip(uint32 charID)                        { return m_aiShips.find(charID) != m_aiShips.end(); }
 
     // See A321 §4.7 — Phantom player sessions (online presence without TCP)
@@ -125,6 +126,9 @@ public:
     uint32 GetPlayerCount() const                       { return m_players.size(); }
     uint32 GetSystemCount() const                       { return m_systems.size(); }
     uint32 GetStationCount() const                      { return m_stations.size(); }
+    void RemoveGuestFromAllStations(Client* pClient);   // VEV_TEARDOWN_GUARD_DECL
+    void RemovePhantomFromAllStations(uint32 charID);   // VEV_PHANTOM_TEARDOWN_SWEEP_DECL
+
     uint16 GetClientSeed()                              { return ++m_clientSeedID; }
 
     /* stamp shit here */

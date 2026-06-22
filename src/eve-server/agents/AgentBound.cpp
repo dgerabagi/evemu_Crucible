@@ -253,8 +253,10 @@ PyResult AgentBound::DoAction(PyCallArgs &call, std::optional <PyInt*> actionID)
                 offer.stateID = Mission::State::Accepted;
                 offer.dateAccepted = GetFileTimeNow();
                 offer.expiryTime = GetFileTimeNow() + (30 * m_agent->GetLevel() * EvE::Time::Minute);  // 30m per agent level  ?  test this.
-                if (offer.courierTypeID) {
-                    // add item to players hangar
+                if (offer.courierTypeID and offer.typeID == Mission::Type::Courier) {
+                    // Courier only: spawn delivery items in player's hangar
+                    // Mining missions use courierTypeID for the ore objective but
+                    // must NOT spawn it — player mines it themselves. See A382.
                     sItemFactory.SetUsingClient(call.client);
                     ItemData data(offer.courierTypeID, pchar->itemID(), locTemp, flagNone, offer.courierAmount);
                     InventoryItemRef iRef = sItemFactory.SpawnItem(data);

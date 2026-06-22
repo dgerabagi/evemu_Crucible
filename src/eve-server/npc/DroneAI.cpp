@@ -43,6 +43,21 @@ DroneAIMgr::DroneAIMgr(DroneSE* who)
 
     if (m_entityAttackRange < 10000)   // most of these are low...under 6k  that sux for targeting
         m_entityAttackRange *= 3;
+
+    // VEV_DRONE: player drones (category 18) lack the NPC entity-AI attrs the ranges above
+    // derive from (EntityAttackRange/FlyRange/ChaseMaxDistance/CruiseSpeed all 0) -> CheckDistance()
+    // clears every assigned target as 'too far' and the drone never leaves idle orbit. Derive sane
+    // ranges from the drone's own weapon/nav attrs: engage anything within drone-control range;
+    // SetEngaged() then flies-to + orbits at weapon optimal and Attack() applies damage.
+    if (m_pDrone->GetSelf()->categoryID() == EVEDB::invCategories::Drone) {
+        double optimal = m_pDrone->GetSelf()->GetAttribute(AttrMaxRange).get_float();
+        m_entityOrbitRange = (optimal > 1.0 ? optimal : 1000.0);
+        m_entityAttackRange = 60000.0;   // ~drone control range; don't clear assigned targets
+        m_entityFlyRange    = 60000.0;   // always SetEngaged (fly-to + orbit) an assigned target
+        m_entityChaseRange  = 60000.0;
+        if (m_cruiseSpeed < 1)
+            m_cruiseSpeed = m_chaseSpeed; // NPC cruise attr is 0 on player drones
+    }
 }
 
 void DroneAIMgr::Process() {
@@ -94,6 +109,7 @@ void DroneAIMgr::Process() {
         } break;
 
         case DroneAI::State::Departing: { // return to ship.  when close enough, set lazy orbit
+            if (m_assignedShip == nullptr) { SetIdle(); break; }   // VEV_DRONE_DEPARTING_GUARD (2026-06-20): Offline()->AssignShip(nullptr) can null the anchor mid-recall
             if (m_pDrone->GetPosition().distance(m_assignedShip->GetPosition()) < m_entityOrbitRange)
                 SetIdle();
         } break;
@@ -287,6 +303,16 @@ void DroneAIMgr::Attack(SystemEntity* pSE)
     if (m_mainAttackTimer.Check()) {
         if (pSE == nullptr)
             return;
+        // VEV_DRONE_BUBBLE_GUARD_ATTACK (2026-06-20): a controller that warps to a DIFFERENT bubble
+        // WITHIN the same system never tears down its drones (only RemoveEntity paths do). ProcessWander
+        // then sweeps the stranded drone out (m_bubble=nullptr) but it stays online + ticking; the next
+        // line's m_pDrone->SysBubble()->InBubble() derefs a NULL bubble -> SIGSEGV (N drones, one tick).
+        if (m_pDrone->SysBubble() == nullptr) {
+            _log(DRONE__AI_TRACE, "Drone %s(%u): no bubble (controller left grid); clearing target.",
+                 m_pDrone->GetName(), m_pDrone->GetID());
+            ClearTarget(pSE);
+            return;
+        }
         // Check to see if the target still in the bubble (Client warped out)
         // fighters/bombers are able to follow.
         if (!m_pDrone->SysBubble()->InBubble(pSE->GetPosition())) {

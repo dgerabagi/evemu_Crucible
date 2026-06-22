@@ -223,7 +223,7 @@ EVEServerConfig::EVEServerConfig()
     crime.WeaponFlagTime = 60 /*s*/;//N
 
     // testing
-    testing.EnableDrones = false;
+    testing.EnableDrones = true;   // VEV_DRONE: player/AI drones enabled
     testing.ShipHeat = false;
 
     // debug

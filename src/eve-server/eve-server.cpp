@@ -30,6 +30,9 @@
 
 #include "EVEServerConfig.h"
 #include "NetService.h"
+// Vev JSON-over-WSS gateway — replaces EVE Marshal as the network layer
+// for Vev's browser client + Python agent fleet. See vev-gateway/Gateway.h.
+#include "Gateway.h"
 // data managers
 #include "StaticDataMgr.h"
 #include "StatisticMgr.h"
@@ -893,6 +896,18 @@ int main( int argc, char* argv[] )
 
     sLog.Cyan("           Server", "Started on %s", currentDateTime().c_str());
 
+    // ── Vev gateway ──────────────────────────────────────────────────────
+    // JSON-over-WSS endpoint on :26100 for the Vev browser client + Python
+    // agent fleet. Runs on its own thread; world-mutating commands queue
+    // via the existing ai_command_queue MariaDB table so the main loop
+    // stays the single writer to in-memory world state.
+    vev::Gateway vevGateway;
+    if (!vevGateway.Start(26100)) {
+        sLog.Error("       Vev Gateway", "Failed to bind :26100 — gateway disabled.");
+    } else {
+        sLog.Green("       Vev Gateway", "Listening on ws://0.0.0.0:26100");
+    }
+
     /////////////////////////////////////////////////////////////////////////////////////
     //     !!!  DO NOT PUT ANY INITIALIZATION CODE OR CALLS BELOW THIS LINE   !!!
     /////////////////////////////////////////////////////////////////////////////////////
@@ -940,6 +955,9 @@ int main( int argc, char* argv[] )
     /* stop TCP listener */
     tcps.Close();
     sLog.Warning("   ServerShutdown", "TCP listener stopped." );
+    /* stop Vev gateway */
+    vevGateway.Stop();
+    sLog.Warning("   ServerShutdown", "Vev gateway stopped." );
     /* stop Image Server */
     sImageServer.Stop();
     sLog.Warning("   ServerShutdown", "Image Server stopped." );

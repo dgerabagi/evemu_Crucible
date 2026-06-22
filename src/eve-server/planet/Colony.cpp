@@ -106,9 +106,16 @@ P3             60,000 ISK
 P4          1,200,000 ISK
 */
 
-Colony::Colony(EVEServiceManager& mgr, Client* pClient, SystemEntity* pSE)
+// VEV_PI_TIME: x4 production accel (curator). Divides cycle times + the
+// colony tick so a 3600s schematic cycle runs in 900s. Single knob.
+static const int64 VEV_PI_TIME_MULT = 4;
+
+// VEV_PI_CHARID: charID-owned ctor — the headless/gateway/corp path. m_ownerID is
+// the single source of owner identity; no live Client* is needed to load/tick/save.
+Colony::Colony(EVEServiceManager& mgr, uint32 charID, SystemEntity* pSE)
 :m_svcMgr(mgr),
-m_client(pClient),
+m_client(nullptr),
+m_ownerID(charID),
 m_pSE(pSE->GetPlanetSE()),
 m_colonyTimer(0)
 {
@@ -125,7 +132,17 @@ m_colonyTimer(0)
     m_colonyID = 0;
     m_procTime = 0; // process check.  init to zero and stores last proc time, which is lastRunTime in command center
     tempPinIDs.clear();
-    _log(COLONY__DEBUG, "Colony::Colony() c'tor called for %s(%u) by %s(%u)", pSE->GetName(), pSE->GetID(), pClient->GetName(), pClient->GetCharacterID());
+    _log(COLONY__DEBUG, "Colony::Colony() charID c'tor for %s(%u) owner %u", pSE->GetName(), pSE->GetID(), charID);
+}
+
+// The interactive (client) ctor delegates to the charID ctor, then attaches the
+// client for the build/launch paths that still need ship/skill/jetcan context.
+Colony::Colony(EVEServiceManager& mgr, Client* pClient, SystemEntity* pSE)
+: Colony(mgr, (pClient != nullptr ? pClient->GetCharacterID() : 0), pSE)
+{
+    m_client = pClient;
+    if (pClient != nullptr)
+        _log(COLONY__DEBUG, "Colony::Colony() c'tor called for %s(%u) by %s(%u)", pSE->GetName(), pSE->GetID(), pClient->GetName(), pClient->GetCharacterID());
 }
 
 Colony::~Colony()
@@ -145,7 +162,7 @@ void Colony::Init()
         return;
 
     // check for and load colony if the char has one on this planet
-    if (m_db.LoadColony(m_client->GetCharacterID(), m_pSE->GetID(), ccPin)) {
+    if (m_db.LoadColony(m_ownerID, m_pSE->GetID(), ccPin)) {
         m_colonyID = ccPin->ccPinID;
         Load();
     }
@@ -245,9 +262,48 @@ void Colony::Process()
     }
 }
 
+// ── VEV_PI_LOGI2: export storage/launchpad goods to a hub station hangar.
+// Real items spawned in the owner's hangar; EVE-real per-tier export tax computed
+// (charged by the caller as an ISK sink). Pins classified by group (1029 storage /
+// 1030 spaceport) so stale is* flags can't mislead. Contents cleared in-memory + saved.
+void Colony::HaulExport(uint32 destLocationID, uint32 destFlag, double& outValue, double& outTax, int& outCount, std::string& manifest) {  // VEV_PIEXPORT
+    outValue = 0; outTax = 0; outCount = 0;
+    bool any = false;
+    for (auto& kv : ccPin->pins) {
+        PI_Pin& pin = kv.second;
+        const ItemType* it = sItemFactory.GetType(pin.typeID);
+        uint32 grp = (it != nullptr) ? it->groupID() : 0;
+        if (grp != 1029 && grp != 1030) continue;   // Storage Facilities / Spaceports = export points
+        if (pin.contents.empty()) continue;
+        for (auto& c : pin.contents) {
+            uint16 typeID = c.first; uint32 qty = c.second;
+            if (qty == 0) continue;
+            const ItemType* ct = sItemFactory.GetType(typeID);
+            outValue += (ct != nullptr ? ct->basePrice() : 0.0) * qty;
+            switch (sPIDataMgr.GetProductLevel(typeID)) {
+                case 0: outTax += 0.10 * qty; break;
+                case 1: outTax += 0.76 * qty; break;
+                case 2: outTax += 9.00 * qty; break;
+                case 3: outTax += 600.0 * qty; break;
+                case 4: outTax += 50000.0 * qty; break;
+            }
+            ItemData iData(typeID, m_ownerID, destLocationID, (EVEItemFlags)destFlag, qty);   // VEV_PIEXPORT: hub hangar OR ship PI hold
+            InventoryItemRef iRef = sItemFactory.SpawnItem(iData);
+            if (iRef.get() != nullptr) {
+                char m[48]; snprintf(m, sizeof(m), "%u:%u;", typeID, qty); manifest += m;
+                outCount += (int)qty;
+            }
+        }
+        pin.contents.clear();
+        m_db.RemoveContents(kv.first);   // SaveContents only upserts — delete the emptied rows explicitly
+        any = true;
+    }
+    if (any) { Update(true); m_db.UpdatePins(0, ccPin); }
+}
+
 uint32 Colony::GetOwner()
 {
-    return m_client->GetCharacterID();
+    return m_ownerID;
 }
 
 void Colony::LoadPlants()
@@ -275,7 +331,7 @@ void Colony::LoadPlants()
 
             if (plant.schematicID) {
                 sPIDataMgr.GetSchematicData(plant.schematicID, plant.data);
-                plant.cycleTime     = plant.data.cycleTime * EvE::Time::Second; // data.cycleTime is in seconds
+                plant.cycleTime     = plant.data.cycleTime * EvE::Time::Second / VEV_PI_TIME_MULT; // VEV_PI_TIME x4
                 plant.pLevel        = sPIDataMgr.GetProductLevel(plant.data.outputType);   // i am ordering plant processing by output's Plevel
                 plant.qtyPerCycle   = plant.data.outputQty;     // this is not saved
 
@@ -293,7 +349,7 @@ void Colony::LoadPlants()
 
     // set process timer to 30m
     if (!m_colonyTimer.Enabled())
-        m_colonyTimer.Start(30*60*1000);
+        m_colonyTimer.Start(30*60*1000 / VEV_PI_TIME_MULT); // VEV_PI_TIME x4
 
     if (update)
         UpdatePlantPins();
@@ -350,7 +406,7 @@ void Colony::AbandonColony()
     }
     InventoryItemRef iRef = sItemFactory.GetItemRef(m_colonyID);
     iRef->Delete();
-    m_db.DeleteColony(m_colonyID, m_pSE->GetID(), m_client->GetCharacterID());
+    m_db.DeleteColony(m_colonyID, m_pSE->GetID(), m_ownerID);
     SafeDelete(ccPin);
     ccPin = new PI_CCPin();
     m_colonyID = 0;
@@ -360,8 +416,8 @@ void Colony::AbandonColony()
 void Colony::CreateCommandPin(uint32 itemID, uint32 typeID, double latitude, double longitude) {
     m_colonyID = itemID;
     ccPin->ccPinID = itemID;
-    m_db.SaveCommandCenter(itemID, m_client->GetCharacterID(), m_pSE->GetID(), typeID, latitude, longitude);
-    m_db.AddPlanetForChar(m_pSE->SystemMgr()->GetID(), m_pSE->GetID(), m_client->GetCharacterID(), m_colonyID, m_pSE->GetTypeID());
+    m_db.SaveCommandCenter(itemID, m_ownerID, m_pSE->GetID(), typeID, latitude, longitude);
+    m_db.AddPlanetForChar(m_pSE->SystemMgr()->GetID(), m_pSE->GetID(), m_ownerID, m_colonyID, m_pSE->GetTypeID());
     ccPin->level = PI::Pin::Level0;
     m_procTime = GetFileTimeNow();
     CreatePin(EVEDB::invGroups::Command_Centers, itemID, typeID, latitude, longitude);
@@ -376,17 +432,22 @@ void Colony::CreatePin(uint32 groupID, uint32 pinID, uint32 typeID, double latit
     InventoryItemRef iRef(nullptr);
     if (groupID == Command_Centers) {
         iRef = sItemFactory.GetItemRef(m_colonyID);
-        if (iRef->quantity() > 1) {
-            // check for stack of CC items, and split as needed
-            ItemData data(typeID, m_client->GetCharacterID(), locTemp, flagNone, iRef->quantity() -1);
-            InventoryItemRef iRef2 = sItemFactory.SpawnItem(data);
-            iRef2->Move(m_client->GetShipID(), flagCargoHold);
-            iRef->SetQuantity(1);
+        // VEV_PI_CHARID: consuming the CC from the player's ship is the CLIENT
+        // path only. Headless establish (gateway/corp) spawns a standalone
+        // qty-1 CC item, so there is nothing to split or remove from a ship.
+        if (m_client != nullptr) {
+            if (iRef->quantity() > 1) {
+                // check for stack of CC items, and split as needed
+                ItemData data(typeID, m_ownerID, locTemp, flagNone, iRef->quantity() -1);
+                InventoryItemRef iRef2 = sItemFactory.SpawnItem(data);
+                iRef2->Move(m_client->GetShipID(), flagCargoHold);
+                iRef->SetQuantity(1);
+            }
+            m_client->GetShip()->RemoveItem(iRef);
         }
-        m_client->GetShip()->RemoveItem(iRef);
     } else {
         // type, owner, location, flag, qty
-        ItemData data(typeID, m_client->GetCharacterID(), m_pSE->GetID(), flagNone, 1);
+        ItemData data(typeID, m_ownerID, m_pSE->GetID(), flagNone, 1);
         iRef = sItemFactory.SpawnItem(data);
 
         /*  this shit doesnt work....changes arent sent to client.  not sure why
@@ -405,7 +466,7 @@ void Colony::CreatePin(uint32 groupID, uint32 pinID, uint32 typeID, double latit
     }
 
     pin.typeID = typeID;
-    pin.ownerID = m_client->GetCharacterID();
+    pin.ownerID = m_ownerID;
     pin.latitude = latitude;
     pin.longitude = longitude;
     pin.state = PI::Pin::State::Idle;
@@ -465,6 +526,7 @@ void Colony::CreatePin(uint32 groupID, uint32 pinID, uint32 typeID, double latit
     //iRef->SetAttribute(AttrPowerLoad, m_pg);
 
     ccPin->pins[iRef->itemID()] = pin;
+    m_lastCreatedPin = iRef->itemID();   // VEV_PI_BUILD: expose the real pin id to headless build verbs
 
     if (groupID != Command_Centers)
         tempPinIDs.insert(std::pair<uint8, uint32>(pinID, iRef->itemID()));     // save map of tempID to itemID - this handles the stacked-calls from client to use real itemIDs
@@ -483,7 +545,7 @@ void Colony::CreateLink(uint32 src, uint32 dest, uint16 level) {
         if (itr != tempPinIDs.end())
             dest = itr->second;
     }
-    ItemData data(2280, m_client->GetCharacterID(), locTemp, flagNone, 1);
+    ItemData data(2280, m_ownerID, locTemp, flagNone, 1);
     InventoryItemRef iRef = sItemFactory.SpawnItem(data);
     iRef->Move(m_pSE->GetID(), flagPlanetSurface, true);
     iRef->SaveItem();
@@ -768,7 +830,7 @@ void Colony::SetSchematic(uint32 pinID, uint8 schematicID/*0*/)
         sPIDataMgr.GetSchematicData(schematicID, itr->second.data);
         itr->second.state                   = PI::Pin::State::Idle;
         itr->second.pLevel                  = sPIDataMgr.GetProductLevel(itr->second.data.outputType);
-        itr->second.cycleTime               = itr->second.data.cycleTime * EvE::Time::Second;
+        itr->second.cycleTime               = itr->second.data.cycleTime * EvE::Time::Second / VEV_PI_TIME_MULT; // VEV_PI_TIME x4
         itr->second.installTime             = GetFileTimeNow();
         itr->second.qtyPerCycle             = itr->second.data.outputQty;
         itr->second.schematicID             = schematicID;
@@ -778,14 +840,27 @@ void Colony::SetSchematic(uint32 pinID, uint8 schematicID/*0*/)
 
         m_pLevel = (uint8)EvE::min(m_pLevel, itr->second.pLevel);
 
+        // VEV_PIPROD_FIX: register this runtime-built plant in m_plantMap so ProcessPlants
+        // iterates it WITHOUT a server reboot (previously only LoadPlants emplaced -> a colony
+        // built at runtime never processed until restart). Erase any stale entry first (pLevel
+        // may change when the schematic is re-set), then emplace at the current pLevel.
+        for (auto mit = m_plantMap.begin(); mit != m_plantMap.end(); ) {
+            if (mit->second == pinID) mit = m_plantMap.erase(mit); else ++mit;
+        }
+        m_plantMap.emplace(itr->second.pLevel, pinID);
+
         // set process timer to 30m
         if (!m_colonyTimer.Enabled())
-            m_colonyTimer.Start(30*60*1000);
+            m_colonyTimer.Start(30*60*1000 / VEV_PI_TIME_MULT); // VEV_PI_TIME x4
         _log(COLONY__INFO, "Colony::SetSchematic() - Set Schematic %u in plantID %u", schematicID, pinID);
     } else {
         itr->second = PI_Plant();
         itr->second.data = PI_Schematic();
         itr->second.state = PI::Pin::State::Idle;
+        // VEV_PIPROD_FIX: unregister cleared plant from m_plantMap
+        for (auto mit = m_plantMap.begin(); mit != m_plantMap.end(); ) {
+            if (mit->second == pinID) mit = m_plantMap.erase(mit); else ++mit;
+        }
         _log(COLONY__INFO, "Colony::SetSchematic() - Cleared Schematic from plantID %u", pinID);
     }
     // save schematic update
@@ -838,11 +913,12 @@ void Colony::SetProgramResults(uint32 ecuID, uint16 typeID, uint16 numCycles, fl
         return;
     }
 
-    itr->second.cycleTime = cycleTime * EvE::Time::Hour ;
+    itr->second.cycleTime = cycleTime * EvE::Time::Hour / VEV_PI_TIME_MULT ; // VEV_PI_TIME x4
     itr->second.programType = typeID;
     itr->second.expiryTime = (cycleTime * numCycles) * EvE::Time::Hour + GetFileTimeNow();
     itr->second.headRadius = headRadius;
     itr->second.qtyPerCycle = qtyPerCycle;
+    itr->second.state = PI::Pin::State::Active;   // VEV_PI_ECU: installing a program activates the ECU
     itr->second.schematicID = sPIDataMgr.GetHeadType(sItemFactory.GetItemRef(ecuID)->typeID(), typeID);
 
     m_db.UpdateECUPin(ecuID, ccPin);
@@ -852,7 +928,7 @@ void Colony::SetProgramResults(uint32 ecuID, uint16 typeID, uint16 numCycles, fl
 
     // set process timer to 30m
     if (!m_colonyTimer.Enabled())
-        m_colonyTimer.Start(30*60*1000);
+        m_colonyTimer.Start(30*60*1000 / VEV_PI_TIME_MULT); // VEV_PI_TIME x4
 }
 /*{'FullPath': u'UI/Messages', 'messageID': 256790, 'label': u'PlanetBlackListedBody'}(u'{planet} is not available for the general public.', None, {u'{planet}': {'conditionalValues': [], 'variableType': 10, 'propertyName': None, 'args': 0, 'kwargs': {}, 'variableName': 'planet'}})
  * {'FullPath': u'UI/Messages', 'messageID': 256791, 'label': u'CannotInstallWithoutScanResultsBody'}(u'Your mining foreman reports that an intern seems to have misplaced the necessary mineral survey results. You will need to order a fresh deposit scan before this {typeName} can begin operating.', None, {u'{typeName}': {'conditionalValues': [], 'variableType': 10, 'propertyName': None, 'args': 0, 'kwargs': {}, 'variableName': 'typeName'}})
@@ -867,14 +943,14 @@ PyDict* Colony::TransferCommodities(uint32 srcID, uint32 destID, std::map< uint1
     std::map<uint32, PI_Pin>::iterator src = ccPin->pins.find(srcID);
     if (src == ccPin->pins.end()) {
         _log(COLONY__ERROR, "Colony::TransferCommodities() - srcPin %u not found in ccPin.pins map", srcID);
-        if (m_client->CanThrow())
+        if (m_client != nullptr && m_client->CanThrow())
             throw CustomError ("Source not found.");
         return nullptr; // make error and exit.
     }
     std::map<uint32, PI_Pin>::iterator dest = ccPin->pins.find(destID);
     if (dest == ccPin->pins.end()) {
         _log(COLONY__ERROR, "Colony::TransferCommodities() - destPin %u not found in ccPin.pins map", destID);
-        if (m_client->CanThrow())
+        if (m_client != nullptr && m_client->CanThrow())
             throw CustomError ("Destination not found.");
         return nullptr; // make error and exit.
     }
@@ -942,7 +1018,7 @@ PyRep* Colony::LaunchCommodities(uint32 pinID, std::map< uint16, uint32 >& items
     GPoint location(pSysMgr->GetSE(m_pSE->GetID())->GetPosition());
     location.MakeRandomPointOnSphere(m_pSE->GetRadius() + 2000000);   //2000km orbit for launch can
     ItemData canData(EVEDB::invTypes::PlanetaryLaunchContainer,
-                    m_client->GetCharacterID(),  // owner is Character
+                    m_ownerID,  // owner is Character
                     pSysMgr->GetID(),
                     flagNone,
                     "PI Commodities Container",
@@ -951,7 +1027,7 @@ PyRep* Colony::LaunchCommodities(uint32 pinID, std::map< uint16, uint32 >& items
     CargoContainerRef contRef = sItemFactory.SpawnCargoContainer(canData);
     if (contRef.get() == nullptr) {
         contRef->Delete();
-        if (m_client->CanThrow())
+        if (m_client != nullptr && m_client->CanThrow())
             throw CustomError ("Unable to spawn item of type %u.", EVEDB::invTypes::PlanetaryLaunchContainer);
     }
 
@@ -959,7 +1035,7 @@ PyRep* Colony::LaunchCommodities(uint32 pinID, std::map< uint16, uint32 >& items
         data.allianceID = m_client->GetAllianceID();
         data.corporationID = m_client->GetCorporationID();
         data.factionID = m_client->GetWarFactionID();
-        data.ownerID = m_client->GetCharacterID();
+        data.ownerID = m_ownerID;
     // create new container SE
     ContainerSE* cSE = new ContainerSE(contRef, m_svcMgr, pSysMgr, data);
     contRef->SetMySE(cSE);      // item-to-entity internal interface
@@ -994,7 +1070,7 @@ PyRep* Colony::LaunchCommodities(uint32 pinID, std::map< uint16, uint32 >& items
             case 3:     cost += (  900.00 * cur.second);    break;
             case 4:     cost += (75000.00 * cur.second);    break;
         }
-        ItemData iData(cur.first, m_client->GetCharacterID(), locTemp, flagNone, cur.second);
+        ItemData iData(cur.first, m_ownerID, locTemp, flagNone, cur.second);
         InventoryItemRef iRef = sItemFactory.SpawnItem(iData);
         if (iRef.get() == nullptr)
             continue;
@@ -1019,7 +1095,7 @@ PyRep* Colony::LaunchCommodities(uint32 pinID, std::map< uint16, uint32 >& items
     pin->second.lastLaunchTime = GetFileTimeNow();
 
     // third - create db entry for launch
-    m_db.SaveLaunch(contRef->itemID(), m_client->GetCharacterID(), pSysMgr->GetID(), m_pSE->GetID(), location);
+    m_db.SaveLaunch(contRef->itemID(), m_ownerID, pSysMgr->GetID(), m_pSE->GetID(), location);
 
     // update colony
     Update(true);   // must update and save CC's lastLaunchTime here
@@ -1035,7 +1111,7 @@ PyRep* Colony::LaunchCommodities(uint32 pinID, std::map< uint16, uint32 >& items
         reason += m_pSE->GetName();
 
         AccountService::TransferFunds(
-            m_client->GetCharacterID(),
+            m_ownerID,
             corpCONCORD,  // pSysMgr->GetSovHolder(),
             cost,
             reason.c_str(),
@@ -1055,14 +1131,14 @@ void Colony::PlanetXfer(uint32 spaceportID, std::map< uint32, uint16 > importIte
     std::map<uint32, PI_Pin>::iterator pin = ccPin->pins.find(spaceportID);
     if (pin == ccPin->pins.end()) {
         _log(COLONY__ERROR, "Colony::PlanetXfer() - pinID %u not found in ccPin.pins map", spaceportID);
-        if (m_client->CanThrow())
+        if (m_client != nullptr && m_client->CanThrow())
             throw CustomError ("Your SpacePort on %s was not found.  Ref: ServerError xxxxx.", m_pSE->GetName());
 
         return;
     }
 
     if (pin->second.lastLaunchTime > GetFileTimeNow() + 30 * EvE::Time::Second) { // launch cycle time is 60s
-        if (m_client->CanThrow())
+        if (m_client != nullptr && m_client->CanThrow())
             throw CustomError ("Your Launch crew on %s is still recovering from the last launch.", m_pSE->GetName());
 
         return;
@@ -1113,7 +1189,7 @@ void Colony::PlanetXfer(uint32 spaceportID, std::map< uint32, uint16 > importIte
         reason += m_pSE->GetName();
 
         AccountService::TransferFunds(
-            m_client->GetCharacterID(),
+            m_ownerID,
             m_pSE->GetCustomsOffice()->GetOwnerID(),
             cost,
             reason.c_str(),
@@ -1149,7 +1225,7 @@ void Colony::PlanetXfer(uint32 spaceportID, std::map< uint32, uint16 > importIte
             case 4:     cost += (50000.00 * cur.second);    break;
         }
         // xfer virtual item to real
-        ItemData iData(cur.first, m_client->GetCharacterID(), locTemp, flagNone, cur.second);
+        ItemData iData(cur.first, m_ownerID, locTemp, flagNone, cur.second);
         InventoryItemRef iRef = sItemFactory.SpawnItem(iData);
         iRef->Move(m_pSE->GetCustomsOffice()->GetID(), flagHangar, true);
         ++fromColony;
@@ -1166,7 +1242,7 @@ void Colony::PlanetXfer(uint32 spaceportID, std::map< uint32, uint16 > importIte
         reason += m_pSE->GetName();
 
         AccountService::TransferFunds(
-            m_client->GetCharacterID(),
+            m_ownerID,
             m_pSE->GetCustomsOffice()->GetOwnerID(),
             cost,
             reason.c_str(),
@@ -1322,7 +1398,7 @@ PyRep* Colony::GetColony()
         for (auto cur : tempECUs) {
             std::map<uint32, PI_Pin>::iterator itr = ccPin->pins.find(cur);
             if (itr != ccPin->pins.end()) {
-                m_db.SaveHeads(m_colonyID, m_client->GetCharacterID(), cur, itr->second.heads);
+                m_db.SaveHeads(m_colonyID, m_ownerID, cur, itr->second.heads);
             } else {
                 _log(COLONY__ERROR, "Colony::GetColony()::SaveHeads() - headID %u not found in ccPin.pins map", cur);
             }
@@ -1388,8 +1464,89 @@ void Colony::Update(bool updateTimes/*false*/)
                     m_srcRoutes.size(), m_destRoutes.size());
 }
 
+// VEV_PI_ECU: deterministically run N production cycles NOW (test/debug) by
+// backdating ECU + plant run times so Update() sees N completed cycles.
+void Colony::ForceProductionCycles(int cycles)
+{
+    if (cycles < 1) cycles = 1;
+    m_procTime = GetFileTimeNow();
+    for (auto& kv : ccPin->pins)
+        if (kv.second.isECU && kv.second.cycleTime > 0)
+            kv.second.lastRunTime = m_procTime - kv.second.cycleTime * cycles;
+    for (auto& pl : ccPin->plants)
+        if (pl.second.cycleTime > 0)
+            pl.second.lastRunTime = m_procTime - pl.second.cycleTime * cycles;
+    bool save = true;
+    Update(save);
+    Save();
+}
+
+// VEV_PI_REARM: renew the colony's ECU extraction programs. EVE ECU programs expire
+// (the program runs `numCycles` then stops); without a re-install, ForceProductionCycles
+// / the colony timer correctly produce nothing once expiry passes (curator 2026-06-19
+// caught colonies "stop producing" — that was expiry, not a bug). This re-arms every
+// ECU that ALREADY had a program (keeps its programType/cycleTime/qtyPerCycle, just
+// extends expiry + resets lastRunTime so extraction resumes from now). The autonomy
+// unblock: the Logistics director calls this on a schedule so colonies keep producing.
+// Returns the number of ECUs re-armed.
+int Colony::RearmECUs(int cycles)
+{
+    if (cycles < 1) cycles = 24;
+    const int64 now = GetFileTimeNow();
+    int n = 0;
+    for (auto& kv : ccPin->pins) {
+        PI_Pin& ecu = kv.second;
+        if (!ecu.isECU) continue;
+        if (ecu.programType == 0 || ecu.cycleTime <= 0) continue;   // never had a program → nothing to renew
+        ecu.expiryTime  = now + ecu.cycleTime * (int64)cycles;      // extend life by `cycles` cycles
+        ecu.lastRunTime = now;                                      // resume extraction from now (no back-credit)
+        ecu.state       = PI::Pin::State::Active;
+        m_db.UpdateECUPin(kv.first, ccPin);
+        n++;
+    }
+    if (n > 0 && !m_colonyTimer.Enabled())
+        m_colonyTimer.Start(30 * 60 * 1000 / VEV_PI_TIME_MULT);     // resume the normal production cadence
+    Save();
+    return n;
+}
+
 void Colony::ProcessECUs(bool& updateTimes)
 {
+    // VEV_PI_ECU: clean deterministic extraction. The original (dead, below)
+    // derefs an uninitialized iterator, inverts the expiry gate, and loops the
+    // pin map BY VALUE (changes discarded). Each ACTIVE ECU with a program
+    // extracts its route's qty (x completed cycles) into the route destination.
+    for (auto& kv : ccPin->pins) {
+        PI_Pin& ecu = kv.second;
+        if (!ecu.isECU) continue;
+        if (ecu.state < PI::Pin::State::Active) continue;        // no program installed
+        if (ecu.cycleTime <= 0) continue;
+        if (ecu.expiryTime > EvE::Time::Second && m_procTime > ecu.expiryTime)
+            continue;                                            // program fully expired
+        if (ecu.lastRunTime < EvE::Time::Hour)
+            ecu.lastRunTime = m_procTime - ecu.cycleTime;
+        int64 elapsed = m_procTime - ecu.lastRunTime;
+        int cyc = (int)(elapsed / ecu.cycleTime);
+        if (cyc < 1) continue;
+        auto rng = m_srcRoutes.equal_range(kv.first);            // routes FROM this ECU
+        for (auto it = rng.first; it != rng.second; ++it) {
+            std::map<uint32, PI_Pin>::iterator dst = ccPin->pins.find(it->second.destPinID);
+            if (dst == ccPin->pins.end()) continue;
+            uint32 perCycle = it->second.commodityQuantity ? it->second.commodityQuantity : ecu.qtyPerCycle;
+            uint32 amt = perCycle * (uint32)cyc;
+            dst->second.contents[it->second.commodityTypeID] += amt;
+            dst->second.update = true;
+            if (dst->second.isProcess) {
+                std::map<uint32, PI_Plant>::iterator pl = ccPin->plants.find(dst->first);
+                if (pl != ccPin->plants.end()) pl->second.hasReceivedInputs = true;
+            }
+            _log(COLONY__INFO, "Colony::ProcessECUs() VEV - ECU %u extracted %u x type %u -> pin %u (%i cycles)",
+                 kv.first, amt, it->second.commodityTypeID, it->second.destPinID, cyc);
+        }
+        ecu.lastRunTime += ecu.cycleTime * cyc;
+        updateTimes = true;
+    }
+    return;
     /** @todo  this needs complete review/overhaul...many errors here */
     double delta = 0;
     uint16 cycles = 0, quantity = 0, amount = 0, count = 0;
@@ -1736,49 +1893,48 @@ void Colony::ProcessPlants(bool& updateTimes)
                     continue;
                 }
                 uint16 tempCycles = cycles;
+                // VEV_PIPROD_FIX: two-pass. Stock evemu only set the per-input cycle limit
+                // (cycles2) in the insufficient-material branch, so a plant that had ENOUGH
+                // material left cycles2==0 -> tempCycles collapsed to 0 -> cycles=0: the plant
+                // consumed its inputs but produced NOTHING. PI was never live-fired so this was
+                // never caught. PASS 1 clamps cycles to what every input can supply (no consume);
+                // PASS 2 consumes exactly that. Also fixes over-consume on unbalanced multi-input.
+                bool vevInputsOk = true;
                 for (auto mats : plant->second.data.inputs) {
-                    // loop thru Schematic inputs to verify all required mats are present
                     itemItr = destPin->second.contents.find(mats.first);
                     if (itemItr == destPin->second.contents.end()) {
                         if (is_log_enabled(COLONY__DEBUG))
-                            _log(COLONY__DEBUG, "Colony::ProcessPlants() - %s (%u) not found in Plant Inventory.", \
-                                sPIDataMgr.GetProductName(mats.first), mats.first);
-                        // this required material was not found in plant inventory.  skip further processing
-                        plant->second.state = PI::Pin::State::Idle;
-                        plant->second.lastRunTime = m_procTime;
-                        updateTimes = true;
-                        continue;
+                            _log(COLONY__DEBUG, "Colony::ProcessPlants() - %s (%u) not found in Plant Inventory.",                                 sPIDataMgr.GetProductName(mats.first), mats.first);
+                        vevInputsOk = false;
+                        break;
                     }
-                    if (itemItr->second >= mats.second * cycles) {
-                        itemItr->second -= mats.second * cycles;
-                        plant->second.receivedInputsLastCycle = true;
-                    } else {
-                        // this required material was not sufficient quantity for (num cycles) runs.
-                        // determine how many cycles we can run with current material quantity
+                    cycles2 = itemItr->second / mats.second;
+                    if (cycles2 < 1) {
                         if (is_log_enabled(COLONY__DEBUG))
-                            _log(COLONY__DEBUG, "Colony::ProcessPlants() - Not enough %s (%u) for %i cycles.  Need %u, Have %u", \
-                                    sPIDataMgr.GetProductName(mats.first), mats.first, cycles, mats.second * cycles, itemItr->second);
-                        cycles2 = itemItr->second / mats.second;
-                        if (cycles2 > 0) {
-                            itemItr->second -= mats.second * cycles2;
-                            plant->second.receivedInputsLastCycle = true;
-                            if (is_log_enabled(COLONY__DEBUG))
-                                _log(COLONY__DEBUG, "Colony::ProcessPlants() - Have enough material for %i cycles.", cycles2);
-                        } else {
-                            plant->second.lastRunTime = m_procTime;
-                            plant->second.state = PI::Pin::State::Idle;
-                            updateTimes = true;
-                            continue;
-                        }
+                            _log(COLONY__DEBUG, "Colony::ProcessPlants() - Not enough %s (%u) for a cycle.  Need %u, Have %u",                                     sPIDataMgr.GetProductName(mats.first), mats.first, mats.second, itemItr->second);
+                        vevInputsOk = false;
+                        break;
                     }
-                    // set temp variable with mininmum cycle count
                     if (tempCycles > cycles2)
                         tempCycles = cycles2;
                     cycles2 = 0;
                 }
-                // we have enough mat'l for at least on process.  set cycles based on material in inventory.
+                if (!vevInputsOk) {
+                    plant->second.state = PI::Pin::State::Idle;
+                    plant->second.lastRunTime = m_procTime;
+                    updateTimes = true;
+                    continue;
+                }
                 if (cycles > tempCycles)
-                    cycles = tempCycles;    // temp variable not longer needed at this point.
+                    cycles = tempCycles;
+                // PASS 2: consume exactly (clamped) cycles worth of every input
+                for (auto mats : plant->second.data.inputs) {
+                    itemItr = destPin->second.contents.find(mats.first);
+                    if (itemItr == destPin->second.contents.end())
+                        continue;
+                    itemItr->second -= mats.second * cycles;
+                    plant->second.receivedInputsLastCycle = true;
+                }
             } else {
                 plant->second.lastRunTime = m_procTime;
                 updateTimes = true;

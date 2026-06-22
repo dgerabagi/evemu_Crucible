@@ -71,6 +71,7 @@ public:
     void NewBubbleCenter(GVector shipVelocity, GPoint& newBubbleCenter);
     //call when an entity is removed from the system.
     void Remove(SystemEntity* ent);
+    void RemoveFromAllBubbles(SystemEntity* ent);   // VEV_BUBBLE_PURGE sweep
     void clear();
     void ClearSystemBubbles(uint32 systemID);
     void RemoveBubble(uint32 systemID, SystemBubble* pSB);

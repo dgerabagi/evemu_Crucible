@@ -277,10 +277,17 @@ void Agent::MakeOffer(uint32 charID, MissionOffer& offer)
     //offer.destinationTypeID = 0;
     //offer.dungeonLocationID      = 0;
     //offer.dungeonSolarSystemID   = 0;
-    sMapData.GetMissionDestination(this, misionType, offer);
+    // See A382 — use offer.typeID (actual type from CreateMissionOffer) not misionType
+    // (handles Mining→Courier fallback: misionType=Mining but offer.typeID=Courier)
+    sMapData.GetMissionDestination(this, offer.typeID, offer);
     if (offer.destinationID == 0) {
         // make error here and reset
-        sEntityList.FindClientByCharID(charID)->SendErrorMsg("Internal Server Error. Ref: ServerError 07208.");
+        // VEV_PHANTOM_OFFER_GUARD: phantoms have no Client* — the unguarded
+        // deref SIGSEGV'd the server when an AI pilot's Courier roll failed
+        // destination selection (found in the cycle-2 design read).
+        Client* pVevC = sEntityList.FindClientByCharID(charID);
+        if (pVevC != nullptr)
+            pVevC->SendErrorMsg("Internal Server Error. Ref: ServerError 07208.");
         return;
     }
 

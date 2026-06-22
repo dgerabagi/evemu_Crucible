@@ -62,6 +62,7 @@ public:
 
 private:
     ReactorData*                pData; //ReactorData class
+    int64                       m_vevNextProc;  // VEV_POS_AUTOPROC in-memory throttle
 
 };
 

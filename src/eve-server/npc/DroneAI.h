@@ -59,7 +59,7 @@ public:
 
     void SetIdle();
     void Return();
-    void AssignShip(ShipSE* pSE)                        { m_assignedShip = pSE; }
+    void AssignShip(SystemEntity* pSE)                  { m_assignedShip = pSE; }  // VEV_DRONE
 
 protected:
     void Attack(SystemEntity* pTarget);
@@ -87,7 +87,7 @@ private:
     uint32 m_shieldBoosterDuration;
 
     DroneSE* m_pDrone;
-    ShipSE* m_assignedShip;
+    SystemEntity* m_assignedShip;  // VEV_DRONE: was ShipSE*
 
     TurretFormulas m_formula;
 

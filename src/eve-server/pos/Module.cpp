@@ -9,6 +9,11 @@
 
 
 #include "pos/Module.h"
+#include "EntityList.h"
+#include "system/SystemManager.h"
+
+// VEV_POS_AUTOPROC: how often (seconds) an anchored array runs one production cycle on the tick.
+static const int64 VEV_POS_PROC_SEC = 60;
 
 
 ModuleSE::ModuleSE(StructureItemRef structure, EVEServiceManager& services, SystemManager* system, const FactionData& data)
@@ -32,7 +37,8 @@ void ModuleSE::Process()
 
 ReactorSE::ReactorSE(StructureItemRef structure, EVEServiceManager& services, SystemManager* system, const FactionData& data)
 : StructureSE(structure, services, system, data),
-pData(new ReactorData())
+pData(new ReactorData()),
+m_vevNextProc(0)
 {
 
 }
@@ -61,8 +67,104 @@ void ReactorSE::InitData() {
 void ReactorSE::Process()
 {
     /* called by EntityList::Process on every loop */
-    /*  Enable base call to Process state changes  */
-    StructureSE::Process();
+    StructureSE::Process();   // base state machine (proc timer disabled -> no destiny deref)
+
+    // VEV_POS_AUTOPROC: eve-real periodic production through this anchored structure.
+    // A Moon Harvesting Array harvests its tower's moon into a Silo; a Reactor runs its
+    // configured reaction pulling from + depositing into a Silo. Cheap in-memory throttle
+    // (only a clock compare per loop; DB work only once per interval). Structures have NO
+    // DestinyManager, so there is nothing to deref here.
+    if (m_data.state < EVEPOS::StructureState::Online)
+        return;
+    int64 now = GetFileTimeNow();
+    if (m_vevNextProc == 0) { m_vevNextProc = now + (VEV_POS_PROC_SEC * EvE::Time::Second); return; }
+    if (now < m_vevNextProc)
+        return;
+    m_vevNextProc = now + (VEV_POS_PROC_SEC * EvE::Time::Second);
+
+    const uint32 towerID = m_data.towerID;
+    const uint32 selfID  = m_data.itemID;
+    if (towerID == 0)
+        return;
+    // tower must be online
+    { DBQueryResult r; DBResultRow row; int ts = -1;
+      if (sDatabase.RunQuery(r, "SELECT state FROM posStructureData WHERE itemID=%u", towerID) && r.GetRow(row)) ts = row.GetInt(0);
+      if (ts < (int)EVEPOS::StructureState::Online) return; }
+    // owner (deposit goo/output under the tower owner)
+    uint32 ownerID = m_self->ownerID();
+    // find a Silo (groupID 404) anchored + online at this tower
+    uint32 siloID = 0;
+    { DBQueryResult r; DBResultRow row;
+      if (sDatabase.RunQuery(r, "SELECT s.itemID FROM posStructureData s JOIN entity e ON e.itemID=s.itemID JOIN invTypes t ON t.typeID=e.typeID WHERE s.towerID=%u AND t.groupID=404 AND s.state>=%d ORDER BY s.itemID DESC LIMIT 1", towerID, (int)EVEPOS::StructureState::Online) && r.GetRow(row)) siloID = row.GetUInt(0); }
+    if (siloID == 0)
+        return;   // no anchored silo -> nowhere for production to flow
+
+    // VEV_POS_AUTOPROC: deposit into an existing same-type stack in the silo if present (else spawn) —
+    // keeps the silo from accruing thousands of tiny stacks over many ticks.
+    auto depositToSilo = [&](uint32 typeID, uint32 qty, uint32 silo, uint32 owner) {
+        if (qty == 0) return;
+        uint32 existing = 0, exq = 0;
+        { DBQueryResult r; DBResultRow row; if (sDatabase.RunQuery(r, "SELECT itemID, quantity FROM entity WHERE locationID=%u AND flag=4 AND typeID=%u ORDER BY quantity DESC LIMIT 1", silo, typeID) && r.GetRow(row)) { existing = row.GetUInt(0); exq = row.GetUInt(1); } }
+        if (existing) {
+            InventoryItemRef iRef = sItemFactory.GetItemRef(existing);
+            if (iRef.get() != nullptr) { iRef->SetQuantity(exq + qty); return; }
+        }
+        ItemData idata(typeID, owner, silo, flagHangar, qty);
+        sItemFactory.SpawnItem(idata);
+    };
+
+    if (IsMoonMiner()) {
+        // Moon Harvesting Array: pull the tower's moon materials into the silo (one cycle).
+        const uint32 moonID = m_data.anchorpointID;   // anchor point = the tower's moon
+        DBQueryResult res;
+        if (!sDatabase.RunQuery(res, "SELECT materialTypeID, richness FROM vevMoonResources WHERE moonID=%u", moonID))
+            return;
+        DBResultRow row; int mats = 0;
+        while (res.GetRow(row)) {
+            uint32 matType = row.GetUInt(0); double rich = row.GetDouble(1);
+            uint32 qty = (uint32)(rich * 100.0);   // one cycle's worth
+            if (qty == 0) continue;
+            depositToSilo(matType, qty, siloID, ownerID); mats++;
+        }
+        if (mats > 0)
+            _log(POS__MESSAGE, "ReactorSE::Process() VEV - harvester %u -> %d moon mats into silo %u", selfID, mats, siloID);
+        return;
+    }
+
+    // Reactor: run its configured reaction (if any). A plain Silo has no config -> no-op.
+    uint32 reactionTypeID = 0;
+    { DBQueryResult r; DBResultRow row;
+      if (sDatabase.RunQuery(r, "SELECT reactionTypeID FROM vevPosReactor WHERE structureID=%u", selfID) && r.GetRow(row)) reactionTypeID = row.GetUInt(0); }
+    if (reactionTypeID == 0)
+        return;
+    std::vector<std::pair<uint32,uint32>> inputs, outputs;
+    { DBQueryResult r; DBResultRow row;
+      if (!sDatabase.RunQuery(r, "SELECT input, typeID, quantity FROM invTypeReactions WHERE reactionTypeID=%u", reactionTypeID)) return;
+      while (r.GetRow(row)) { if (row.GetInt(0) == 0) outputs.push_back({row.GetUInt(1), row.GetUInt(2)}); else inputs.push_back({row.GetUInt(1), row.GetUInt(2)}); } }
+    if (inputs.empty() || outputs.empty())
+        return;
+    // verify one cycle of every input is present in the silo
+    for (auto& in : inputs) {
+        uint32 have = 0; DBQueryResult r; DBResultRow row;
+        if (sDatabase.RunQuery(r, "SELECT COALESCE(SUM(quantity),0) FROM entity WHERE locationID=%u AND flag=4 AND typeID=%u", siloID, in.first) && r.GetRow(row)) have = row.GetUInt(0);
+        if (have < in.second) return;   // not enough yet -> wait for the harvester / feed
+    }
+    // consume one cycle (greedy across stacks)
+    for (auto& in : inputs) {
+        uint32 need = in.second; DBQueryResult r; DBResultRow row;
+        sDatabase.RunQuery(r, "SELECT itemID, quantity FROM entity WHERE locationID=%u AND flag=4 AND typeID=%u ORDER BY quantity ASC", siloID, in.first);
+        while (need > 0 && r.GetRow(row)) {
+            uint32 itemID = row.GetUInt(0), q = row.GetUInt(1);
+            InventoryItemRef iRef = sItemFactory.GetItemRef(itemID);
+            if (iRef.get() == nullptr) continue;
+            if (q <= need) { need -= q; iRef->Delete(); }
+            else { iRef->SetQuantity(q - need); need = 0; }
+        }
+    }
+    // produce one cycle of output into the silo
+    for (auto& out : outputs)
+        depositToSilo(out.first, out.second, siloID, ownerID);
+    _log(POS__MESSAGE, "ReactorSE::Process() VEV - reactor %u ran reaction %u into silo %u", selfID, reactionTypeID, siloID);
 }
 
 /** @note  basic notes on player owned structures

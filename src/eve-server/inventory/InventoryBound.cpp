@@ -26,6 +26,7 @@
 
 #include "eve-server.h"
 #include "../../eve-common/EVE_Station.h"
+#include "../../eve-common/EVE_Inventory.h"  // VEV_WRECK_TAKE_NOTIFY (Inv::Update)
 
 
 #include "EVEServerConfig.h"
@@ -602,6 +603,17 @@ PyRep* InventoryBound::MoveItems(Client* pClient, std::vector< int32 >& items, E
                     _log(INV__ERROR, "IB::MoveItems() - previous container for item %i not found.  continuing.", (*itr));
                 }
                 continue;
+            }
+
+            // VEV_WRECK_TAKE_NOTIFY: wreck->ship-cargo take uses InventoryItem::Move(), which
+            // PRESERVES the loot ownerID (= dead AI victim for harvest loot), so the built-in
+            // SendItemChange notifies a clientless owner and the looter's client never refreshes
+            // (item persists in DB, visible only after relog). Notify the ACTING client directly.
+            if ((pClient != nullptr) and (iRef->ownerID() != (uint32)pClient->GetCharacterID())) {
+                std::map<int32, PyRep*> vevChg;
+                vevChg[Inv::Update::Location] = new PyInt(m_itemID);
+                vevChg[Inv::Update::Flag] = new PyInt(fromFlag);
+                iRef->SendItemChange(pClient->GetCharacterID(), vevChg);  // changes consumed
             }
         } else if (customs) {
             pInventory->ValidateAddItem(toFlag, iRef);  // this will throw if it fails

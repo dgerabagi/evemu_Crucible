@@ -155,6 +155,10 @@ PyRep *SearchDB::QuickQuery(std::string string, std::vector<int> *searchID, uint
         /** @todo i dont remember what this was for, but need to finish it anyway */
     }
 
+    // See A382 — escape search string to prevent SQL injection from apostrophes etc.
+    std::string escaped;
+    sDatabase.DoEscapeString(escaped, string);
+
     PyList *result = new PyList();
     DBQueryResult res;
     DBResultRow row;
@@ -166,68 +170,68 @@ PyRep *SearchDB::QuickQuery(std::string string, std::vector<int> *searchID, uint
                     "SELECT characterID"
                     " FROM chrNPCCharacters"
                     " WHERE characterName LIKE '%s' "
-                    " LIMIT 0, 10", string.c_str() );
+                    " LIMIT 0, 10", escaped.c_str() );
                 break;
             case 2: //searchResultCharacter = 2
                 sDatabase.RunQuery(res,
                     "SELECT characterID"
                     " FROM chrCharacters"
-                    " WHERE characterName LIKE '%s' ", string.c_str() );
+                    " WHERE characterName LIKE '%s' ", escaped.c_str() );
                 break;
             case 3: //searchResultCorporation = 3
                 sDatabase.RunQuery(res,
                     "SELECT corporationID"
                     " FROM crpCorporation"
                     " WHERE corporationName LIKE '%s' "
-                    " LIMIT 0, 10", string.c_str() );
+                    " LIMIT 0, 10", escaped.c_str() );
                 break;
             case 4: //searchResultAlliance = 4
                 sDatabase.RunQuery(res,
                     "SELECT allianceID"
                     " FROM alnAlliance"
                     " WHERE shortName LIKE '%s' "
-                    " LIMIT 0, 10", string.c_str() );
+                    " LIMIT 0, 10", escaped.c_str() );
                 break;
             case 5: //searchResultFaction = 5
                 sDatabase.RunQuery(res,
                     "SELECT factionID"
                     " FROM facFactions"
                     " WHERE factionName LIKE '%s' "
-                    " LIMIT 0, 10", string.c_str() );
+                    " LIMIT 0, 10", escaped.c_str() );
                 break;
             case 6: //searchResultConstellation = 6
                 sDatabase.RunQuery(res,
                     "SELECT constellationID"
                     " FROM mapConstellations"
                     " WHERE constellationName LIKE '%s' "
-                    " LIMIT 0, 10", string.c_str() );
+                    " LIMIT 0, 10", escaped.c_str() );
                 break;
             case 7: //searchResultSolarSystem = 7
                 sDatabase.RunQuery(res,
                     "SELECT solarSystemID"
                     " FROM mapSolarSystems "
                     " WHERE solarSystemName LIKE '%s' "
-                    " LIMIT 0, 10", string.c_str() );
+                    " LIMIT 0, 10", escaped.c_str() );
                 break;
             case 8: //searchResultRegion = 8
                 sDatabase.RunQuery(res,
                     "SELECT regionID"
                     " FROM mapRegions"
                     " WHERE regionName LIKE '%s' "
-                    " LIMIT 0, 10", string.c_str() );
+                    " LIMIT 0, 10", escaped.c_str() );
                 break;
             case 9: //searchResultStation = 9
                 sDatabase.RunQuery(res,
                     "SELECT stationID"
                     " FROM staStations "
                     " WHERE stationName LIKE '%s' "
-                    " LIMIT 0, 10", string.c_str() );
+                    " LIMIT 0, 10", escaped.c_str() );
                 break;
             case 10:    //searchResultInventoryType = 10
                 sDatabase.RunQuery(res,
                     "SELECT typeID"
                     " FROM invTypes"
-                    " WHERE typeName LIKE '%s'", string.c_str() );
+                    " WHERE typeName LIKE '%s'", escaped.c_str() );
                 break;
         }
         while (res.GetRow(row)) {

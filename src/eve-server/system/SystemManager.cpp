@@ -64,6 +64,7 @@
 #include "system/cosmicMgrs/BeltMgr.h"
 #include "system/cosmicMgrs/DungeonMgr.h"
 #include "system/cosmicMgrs/SpawnMgr.h"
+#include "system/cosmicMgrs/ConcordMgr.h"
 #include "station/Outpost.h"
 #include "services/ServiceManager.h"
 
@@ -75,6 +76,7 @@ m_anomMgr(new AnomalyMgr(this, svc)),
 m_beltMgr(new BeltMgr(this, svc)),
 m_dungMgr(new DungeonMgr(this, svc)),
 m_spawnMgr(new SpawnMgr(this, svc)),
+m_concordMgr(new ConcordMgr(this, svc)),
 m_loaded(false),
 m_entityChanged(false),
 m_docked(0),
@@ -129,6 +131,7 @@ SystemManager::~SystemManager() {
     SafeDelete(m_anomMgr);
     SafeDelete(m_beltMgr);
     SafeDelete(m_spawnMgr);
+    SafeDelete(m_concordMgr);
 }
 
 bool SystemManager::BootSystem() {
@@ -202,6 +205,7 @@ bool SystemManager::LoadCosmicMgrs()
 {
     if (m_beltCount)
         m_beltMgr->Init();  //nothing to check for in this init.
+        m_concordMgr->Init();  // VEV_CONCORD
 
     if (!m_spawnMgr->Init()) {
         _log(SERVER__INIT_ERR, "Unable to load Spawn Manager during boot of system %u.", m_data.systemID);
@@ -264,6 +268,7 @@ bool SystemManager::ProcessTic() {
         m_beltMgr->Process();
     m_dungMgr->Process();
     m_spawnMgr->Process();
+    m_concordMgr->Process();  // VEV_CONCORD
 
     // process planets for PI
     if (m_minutetimer.Check()) {
@@ -544,11 +549,63 @@ bool SystemManager::BuildDynamicEntity(const DBSystemDynamicEntity& entity, uint
         pWE->SetLaunchedByID(launcherID);
         if (IsCharacterID(entity.ownerID)) {
             Client* pClient = sEntityList.FindClientByCharID(entity.ownerID);
-            if (pClient->InFleet())
+            if (pClient != nullptr && pClient->InFleet()) // VEV_CRASH_NULLGUARD
                 pWE->SetFleetID(pClient->GetFleetID());
         }
     }
     return true;
+}
+
+// VEV_POS0: headless control-tower deploy at a moon (mirrors PlanetSE::CreateCustomsOffice).
+uint32 SystemManager::DeployTower(uint32 moonID, uint32 typeID, uint32 ownerID, uint32 corpID) {
+    SystemEntity* moonSE = GetSE(moonID);
+    if (moonSE == nullptr) return 0;
+    FactionData data = FactionData();
+    data.ownerID = ownerID; data.corporationID = corpID; data.allianceID = 0; data.factionID = 0;
+    ItemData idata(typeID, ownerID, GetID(), flagNone, 1, std::to_string(moonID).c_str(), false);
+    StructureItemRef iRef = sItemFactory.SpawnStructure(idata);
+    if (iRef.get() == nullptr) return 0;
+    GPoint pos(moonSE->GetPosition());
+    pos.x += (moonSE->GetRadius() + 50000.0);
+    iRef->SetPosition(pos);
+    iRef->ChangeSingleton(true, false);
+    iRef->SaveItem();
+    TowerSE* tSE = new TowerSE(iRef, m_services, this, data);
+    AddEntity(tSE);                 // sBubbleMgr.Add sets m_bubble (TowerSE::Init asserts it)
+    tSE->Init();                    // now m_bubble is live
+    tSE->VevDeployHeadless(moonID);
+    return iRef->itemID();
+}
+
+uint32 SystemManager::AnchorPosStructure(uint32 towerID, uint32 typeID, uint32 ownerID, uint32 corpID) {
+    SystemEntity* towerSE = GetSE(towerID);
+    if (towerSE == nullptr) return 0;
+    // anchor point = the tower's moon (a static map item — passes StructureSE::Init's gate)
+    uint32 moonID = 0;
+    { DBQueryResult r; DBResultRow row; if (sDatabase.RunQuery(r, "SELECT anchorpointID FROM posStructureData WHERE itemID=%u", towerID) && r.GetRow(row)) moonID = row.GetUInt(0); }
+    if (moonID == 0) return 0;
+    FactionData data = FactionData();
+    data.ownerID = ownerID; data.corporationID = corpID; data.allianceID = 0; data.factionID = 0;
+    ItemData idata(typeID, ownerID, GetID(), flagNone, 1, std::to_string(moonID).c_str(), false);
+    StructureItemRef iRef = sItemFactory.SpawnStructure(idata);
+    if (iRef.get() == nullptr) return 0;
+    GPoint pos(towerSE->GetPosition());
+    pos.x += 5000.0; pos.y += 2000.0;   // inside the tower force-field bubble
+    iRef->SetPosition(pos);
+    iRef->ChangeSingleton(true, false);
+    iRef->SaveItem();
+    StructureSE* sSE = nullptr;
+    uint32 groupID = iRef->groupID();
+    if (groupID == EVEDB::invGroups::Silo
+        || groupID == EVEDB::invGroups::Moon_Mining
+        || groupID == EVEDB::invGroups::Mobile_Reactor)
+        sSE = new ReactorSE(iRef, m_services, this, data);
+    else
+        sSE = new ArraySE(iRef, m_services, this, data);
+    AddEntity(sSE);                       // sets m_bubble
+    sSE->VevAnchorPreSave(towerID, moonID);  // write posStructureData (Online, towerID) BEFORE Init
+    sSE->Init();                          // GetBaseData loads it; m_module branch binds the tower
+    return iRef->itemID();
 }
 
 SystemEntity* DynamicEntityFactory::BuildEntity(SystemManager& sysMgr, const DBSystemDynamicEntity& entity)
@@ -1060,6 +1117,13 @@ void SystemManager::AddEntity(SystemEntity* pSE, bool addSignal/*true*/) {
     } else {
         _log(ITEM__TRACE, "%s(%u): Added to system manager for %s(%u)", pSE->GetName(), itemID, m_data.name.c_str(), m_data.systemID);
         m_entities[itemID] = pSE;
+        // VEV_AISHIP_FIRSTCLASS_OCCUPANT (2026-06-21): an AI ship ENTERING a system clears the unload
+        // timer exactly like a human does in AddClient (m_activityTime=0, line ~998). Without this
+        // symmetry, a system whose timer ARMED during a docked window (no AIShipSE present -> SafeToUnload
+        // true) stays armed after the pilot UNDOCKS via this AddEntity path, so the reaper frees the system
+        // ~60s later out from under the live pilot -> dangling m_system -> warp_to -> GetSE -> SIGSEGV.
+        if (pSE->IsAIShipSE())
+            m_activityTime = 0;
 
         if ((pSE->IsCOSE())
         or  (pSE->isGlobal())) {
@@ -1094,6 +1158,16 @@ void SystemManager::RemoveEntity(SystemEntity* pSE) {
     if (pSE == nullptr)
         return;
     sBubbleMgr.Remove(pSE);
+    sBubbleMgr.RemoveFromAllBubbles(pSE);   // VEV_BUBBLE_PURGE: stale-bubble map sweep
+    // VEV (2026-06-09): notify every entity holding pSE as a Destiny target so cached
+    // target pointers are nulled BEFORE pSE is freed. The only prior clearing path
+    // (DestinyManager::EntityRemoved via TargetManager::TargetLost) ran solely through the
+    // combat m_targetedBy reciprocal; wander-orbit + phantom-aggro never populate it, so a
+    // belt-rat orbiting a mined-out asteroid (or a warped-off phantom) kept a dangling
+    // m_targetEntity.second and segfaulted in its next Orbit()/Follow()/MoveObject() tic.
+    for (auto& cur : m_entities)
+        if (cur.second != nullptr && cur.second != pSE && cur.second->DestinyMgr() != nullptr)
+            cur.second->DestinyMgr()->EntityRemoved(pSE);
     // Remove Entity's Item Ref from Solar System Dynamic Inventory:
     RemoveItemFromInventory(pSE->GetSelf());
     // remove entity from our maps

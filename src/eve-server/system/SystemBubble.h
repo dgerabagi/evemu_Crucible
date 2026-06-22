@@ -83,6 +83,7 @@ public:
     /* used for bubble management */
     bool IsEmpty() const                                { return (m_entities.empty() ? m_dynamicEntities.empty() : false); }
     bool HasPlayers() const                             { return !m_players.empty(); }
+    bool HasAIShips() const                             { return !m_aiShips.empty(); }   // VEV_PHANTOM_BUBBLE_CITIZEN
     bool HasStatics() const                             { return !m_entities.empty(); }
     bool HasDynamics() const                            { return !m_dynamicEntities.empty(); }
     double x() const                                    { return m_center.x; }
@@ -105,6 +106,10 @@ public:
      * `SystemEntity`'s bubble.
      */
     void Untrack(SystemEntity* pSE);
+    // VEV_BUBBLE_PURGE: unconditional map hygiene for a dying entity — erases the
+    // itemID from every SE map regardless of pSE->m_bubble state (Untrack early-
+    // returns on a null/stale m_bubble and leaves freed pointers behind).
+    void PurgeEntity(uint32 itemID);
     void Remove(SystemEntity* pSE);
     void ProcessWander(std::vector< SystemEntity* >& wanderers);
 
@@ -143,6 +148,7 @@ public:
     void GetStaticEntities(std::map< uint32, SystemEntity* >& into) const;
     /* for targeting purposes */
     void GetPlayers(std::vector<Client*> &into) const;
+    void GetAIShips(std::vector<SystemEntity*> &into) const;   // VEV_PHANTOM_BUBBLE_CITIZEN
     /* for scanning */
     void GetEntityVec(std::vector<SystemEntity*> &into) const;
     SystemEntity* GetRandomEntity();
@@ -202,6 +208,7 @@ private:
     std::map<uint32, Client*> m_players;                // testing with bubble player list (in std::map)
     std::map<uint32, SystemEntity*> m_markers;          // bubble marker cans.  we do own these.
     std::map<uint32, SystemEntity*> m_dynamicEntities;  //entities which may/may not move. we do not own these.
+    std::map<uint32, SystemEntity*> m_aiShips;          // VEV_PHANTOM_BUBBLE_CITIZEN: pilotless AI-ship phantoms (m_players is Client*-only; a phantom has no Client*). Belt-rat spawn gate + NPC aggro honor this.
     std::map<uint32, SystemEntity*> m_entities;         //we do not own these.
     std::map<uint32, DroneSE*> m_drones;                //we do not own these.
 

@@ -583,6 +583,7 @@ SET( system_SOURCE
      "${TARGET_SOURCE_DIR}/system/Container.cpp"
      "${TARGET_SOURCE_DIR}/system/Damage.cpp"
      "${TARGET_SOURCE_DIR}/system/DestinyManager.cpp"
+     "${TARGET_SOURCE_DIR}/system/GridStreamer.cpp"
      "${TARGET_SOURCE_DIR}/system/IndexManager.cpp"
      "${TARGET_SOURCE_DIR}/system/KeeperService.cpp"
      "${TARGET_SOURCE_DIR}/system/ScenarioService.cpp"
@@ -608,6 +609,7 @@ SET( system_sov_SOURCE
 SET( system_managers_INCLUDE
      "${TARGET_INCLUDE_DIR}/system/cosmicMgrs/AnomalyMgr.h"
      "${TARGET_INCLUDE_DIR}/system/cosmicMgrs/BeltMgr.h"
+     "${TARGET_INCLUDE_DIR}/system/cosmicMgrs/ConcordMgr.h"
      "${TARGET_INCLUDE_DIR}/system/cosmicMgrs/CivilianMgr.h"
      "${TARGET_INCLUDE_DIR}/system/cosmicMgrs/DungeonMgr.h"
      "${TARGET_INCLUDE_DIR}/system/cosmicMgrs/ManagerDB.h"
@@ -616,6 +618,7 @@ SET( system_managers_INCLUDE
 SET( system_managers_SOURCE
      "${TARGET_SOURCE_DIR}/system/cosmicMgrs/AnomalyMgr.cpp"
      "${TARGET_SOURCE_DIR}/system/cosmicMgrs/BeltMgr.cpp"
+     "${TARGET_SOURCE_DIR}/system/cosmicMgrs/ConcordMgr.cpp"
      "${TARGET_SOURCE_DIR}/system/cosmicMgrs/CivilianMgr.cpp"
      "${TARGET_SOURCE_DIR}/system/cosmicMgrs/DungeonMgr.cpp"
      "${TARGET_SOURCE_DIR}/system/cosmicMgrs/ManagerDB.cpp"
@@ -766,9 +769,11 @@ target_precompile_headers( "${TARGET_NAME}" PUBLIC
                   "${TARGET_INCLUDE_DIR}/eve-server.h" )
 TARGET_INCLUDE_DIRECTORIES( "${TARGET_NAME}"
                             ${eve-common_INCLUDE_DIRS}
-                            "${TARGET_INCLUDE_DIR}" )
+                            "${TARGET_INCLUDE_DIR}"
+                            "${PROJECT_SOURCE_DIR}/src/vev-gateway" )
 TARGET_LINK_LIBRARIES( "${TARGET_NAME}"
-                       "eve-common" )
+                       "eve-common"
+                       "vev-gateway" )
 
 INSTALL( TARGETS "${TARGET_NAME}"
          RUNTIME DESTINATION "bin" )

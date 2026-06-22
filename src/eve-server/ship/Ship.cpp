@@ -2633,7 +2633,7 @@ void ShipSE::EncodeDestiny( Buffer& into) {
                 warp.targZ = target.z;
                 warp.speed = m_destiny->GetWarpSpeed();       //ship warp speed x10  (dont ask...this is what it is...more dumb ccp shit)
                 // warp timing.  see ShipSE::EncodeDestiny() for notes/updates
-                warp.effectStamp = -1; //m_destiny->GetStateStamp();   //timestamp when warp started
+                warp.effectStamp = m_destiny->GetStateStamp(); // VEV_DESYNC_FIX: real warp-start stamp so client phase-aligns its decel clock
                 warp.followRange = 0;   //this isnt right
                 warp.followID = 0;  //this isnt right
             into.Append(warp);
@@ -2799,9 +2799,27 @@ void ShipSE::ApplyBoost(BoostData& bData)
 }
 //{'FullPath': u'UI/Messages', 'messageID': 257802, 'label': u'DronesDroppedBecauseOfBandwidthModificationBody'}(u'The drone control bandwidth of your ship has been modified causing you to lose the ability to control some drones.', None, None)
 
+// VEV_DRONE: human entry point — derive owner identity from the bound pilot, then
+// delegate to the Client*-free overload.  Phantom AIShipSE pilots (no Client*) must
+// call the FactionData overload directly (see EntityList drone verbs).
 bool ShipSE::LaunchDrone(InventoryItemRef dRef) {
-    Character* pChar = GetPilot()->GetChar().get();
-    sLog.Magenta("ShipSE::LaunchDrone()","%s: Launching drone %u",  pChar->name(), dRef->itemID());
+    Client* pPilot = GetPilot();
+    if (pPilot == nullptr) {
+        sLog.Error("ShipSE::LaunchDrone()", "ship %u has no pilot Client*; AI ships must use the FactionData overload.", GetID());
+        return false;
+    }
+    Character* pChar = pPilot->GetChar().get();
+    FactionData data = FactionData();
+        data.allianceID = pChar->allianceID();
+        data.corporationID = pChar->corporationID();
+        data.factionID = pChar->warFactionID();
+        data.ownerID = pChar->itemID();
+    return LaunchDrone(dRef, data);
+}
+
+// VEV_DRONE: Client*-free launch.  Owner identity supplied explicitly so phantom AI ships can launch.
+bool ShipSE::LaunchDrone(InventoryItemRef dRef, const FactionData& data) {
+    sLog.Magenta("ShipSE::LaunchDrone()","owner %u: Launching drone %u", data.ownerID, dRef->itemID());
 
     dRef->Move(GetLocationID(), flagNone, true);
     dRef->ChangeSingleton(true);
@@ -2811,11 +2829,6 @@ bool ShipSE::LaunchDrone(InventoryItemRef dRef) {
     dRef->SetPosition(position);
 
     //now we create an SE to represent it.
-    FactionData data = FactionData();
-        data.allianceID = pChar->allianceID();
-        data.corporationID = pChar->corporationID();
-        data.factionID = pChar->warFactionID();
-        data.ownerID = pChar->itemID();
     DroneSE* pDrone = new DroneSE(dRef, m_services, m_system, data);
 
     // tell new drone it's being launched.
@@ -2840,6 +2853,58 @@ bool ShipSE::LaunchDrone(InventoryItemRef dRef) {
     //{'FullPath': u'UI/Messages', 'messageID': 258031, 'label': u'MaxBandwidthExceededBody'}(u"You don't have enough bandwidth to launch {droneName}. You need {bandwidthNeeded} Mbit/s but {droneName} requires {droneBandwidthUsed} Mbit/s.", None, {u'{droneName}': {'conditionalValues': [], 'variableType': 10, 'propertyName': None, 'args': 0, 'kwargs': {}, 'variableName': 'droneName'}, u'{droneBandwidthUsed}': {'conditionalValues': [], 'variableType': 10, 'propertyName': None, 'args': 0, 'kwargs': {}, 'variableName': 'droneBandwidthUsed'}, u'{bandwidthNeeded}': {'conditionalValues': [], 'variableType': 10, 'propertyName': None, 'args': 0, 'kwargs': {}, 'variableName': 'bandwidthNeeded'}})
     //{'FullPath': u'UI/Messages', 'messageID': 258041, 'label': u'MaxBandwidthExceeded2Body'}(u"You don't have enough bandwidth to launch {droneName}. You need {droneBandwidthUsed} Mbit/s but only have {bandwidthLeft} Mbit/s available.", None, {u'{droneName}': {'conditionalValues': [], 'variableType': 10, 'propertyName': None, 'args': 0, 'kwargs': {}, 'variableName': 'droneName'}, u'{bandwidthLeft}': {'conditionalValues': [], 'variableType': 10, 'propertyName': None, 'args': 0, 'kwargs': {}, 'variableName': 'bandwidthLeft'}, u'{droneBandwidthUsed}': {'conditionalValues': [], 'variableType': 10, 'propertyName': None, 'args': 0, 'kwargs': {}, 'variableName': 'droneBandwidthUsed'}})
     return false;
+}
+
+// VEV_DRONE: AI-pilot bridge — launch every drone currently in the drone bay (flag 87).
+uint8 ShipSE::LaunchAllDrones(const FactionData& data) {
+    std::vector<InventoryItemRef> bay;
+    m_shipRef->GetMyInventory()->GetItemsByFlag(flagDroneBay, bay);
+    uint8 launched = 0;
+    for (InventoryItemRef dRef : bay) {
+        if (dRef.get() == nullptr)
+            continue;
+        if (dRef->categoryID() != EVEDB::invCategories::Drone)
+            continue;
+        if (m_drones.find(dRef->itemID()) != m_drones.end())
+            continue;  // already in space
+        if (LaunchDrone(dRef, data))
+            ++launched;
+    }
+    return launched;
+}
+
+// VEV_DRONE: point every launched (onlined) drone's AI at pTarget.
+void ShipSE::EngageDrones(SystemEntity* pTarget) {
+    if (pTarget == nullptr)
+        return;
+    for (auto& cur : m_drones) {
+        SystemEntity* pSE = m_system->GetSE(cur.first);
+        if ((pSE != nullptr) and pSE->IsDroneSE()) {
+            DroneSE* pDrone = pSE->GetDroneSE();
+            if (pDrone->IsEnabled())
+                pDrone->GetAI()->Target(pTarget);  // StartTargeting -> CheckDistance -> Attack
+        }
+    }
+}
+
+// VEV_DRONE: scoop every launched drone back to the bay (mirrors ShipBound::ScoopDrone, Client*-free).
+void ShipSE::ReturnAllDrones() {
+    std::vector<uint32> ids;
+    for (auto& cur : m_drones)
+        ids.push_back(cur.first);
+    for (uint32 id : ids) {
+        SystemEntity* pSE = m_system->GetSE(id);
+        if ((pSE == nullptr) or !pSE->IsDroneSE())
+            continue;
+        InventoryItemRef iRef = pSE->GetSelf();
+        if (iRef.get() != nullptr) {
+            iRef->ChangeOwner(m_self->ownerID(), true);
+            iRef->Move(m_shipRef->itemID(), flagDroneBay, true);
+        }
+        ScoopDrone(pSE);            // erases from m_drones, offlines, restores bandwidth
+        m_system->RemoveEntity(pSE);
+        SafeDelete(pSE);
+    }
 }
 
 void ShipSE::ScoopDrone(SystemEntity* pSE) {

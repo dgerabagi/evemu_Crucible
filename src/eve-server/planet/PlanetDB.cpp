@@ -87,6 +87,21 @@ PyRep* PlanetDB::GetPlanetsForChar(uint32 charID) {
     return DBResultToCRowset(res);
 }
 
+// VEV_PI_CHARID: charIDs that own a colony on this planet — the enumeration the
+// boot-time headless load needs (there was only GetPlanetsForChar before).
+void PlanetDB::GetColonyOwners(uint32 planetID, std::vector<uint32>& owners)
+{
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT charID FROM piPlanets WHERE planetID = %u", planetID)) {
+        _log(DATABASE__ERROR, "GetColonyOwners query: %s", res.error.c_str());
+        return;
+    }
+    DBResultRow row;
+    while (res.GetRow(row))
+        owners.push_back(row.GetUInt(0));
+}
+
 void PlanetDB::AddPlanetForChar(uint32 solarSystemID, uint32 planetID, uint32 charID, uint32 ccPinID, uint16 typeID)
 {
     DBerror err;
@@ -239,7 +254,8 @@ void PlanetDB::LoadPins(uint32 ccPinID, std::map<uint32, PI_Pin>& pins)
         " isCommandCenter, isLaunchable, isProcess, isStorage, isECU,"
         " schematicID, programType, headRadius,"
         " launchTime, cycleTime, expiryTime, installTime, lastRunTime,"
-        " hasReceivedInputs, receivedInputsLastCycle, qtyPerCycle"
+        " hasReceivedInputs, receivedInputsLastCycle, qtyPerCycle,"
+        " (SELECT groupID FROM invTypes WHERE typeID = piPins.typeID)"   // VEV_PI_FLAGDERIVE
         " FROM piPins"
         " WHERE ccPinID = %u", ccPinID))
     {
@@ -274,6 +290,15 @@ void PlanetDB::LoadPins(uint32 ccPinID, std::map<uint32, PI_Pin>& pins)
             pin.hasReceivedInputs       = row.GetBool(20);
             pin.receivedInputsLastCycle = row.GetBool(21);
             pin.qtyPerCycle             = row.GetInt(22);
+
+            // VEV_PI_FLAGDERIVE: structural flags from the immutable group, not the
+            // stored is* values (which drift to 0 over the tick/save lifecycle).
+            uint32 grp = row.GetInt(23);
+            pin.isCommandCenter = (grp == 1027);
+            pin.isLaunchable    = (grp == 1027 || grp == 1030);
+            pin.isProcess       = (grp == 1028);
+            pin.isStorage       = (grp == 1027 || grp == 1028 || grp == 1029 || grp == 1030);
+            pin.isECU           = (grp == 1063);
 
         if (pin.isStorage or pin.isProcess)
             LoadContents(row.GetInt(0), pin.contents);
@@ -464,6 +489,9 @@ void PlanetDB::SavePins(PI_CCPin* ccPin)
     if (!first) {
         // finish creating the command.
         Inserts << " ON DUPLICATE KEY UPDATE ";
+        Inserts << " isCommandCenter=VALUES(isCommandCenter), isLaunchable=VALUES(isLaunchable), ";  // VEV_PI: flags were stuck after first insert
+        Inserts << " isProcess=VALUES(isProcess), isStorage=VALUES(isStorage), isECU=VALUES(isECU), ";
+        Inserts << " level=VALUES(level), latitude=VALUES(latitude), longitude=VALUES(longitude), ";
         Inserts << " schematicID=VALUES(schematicID), ";
         Inserts << " programType=VALUES(programType), ";
         Inserts << " headRadius=VALUES(headRadius),";
@@ -522,6 +550,9 @@ void PlanetDB::UpdatePins(uint32 pinID, PI_CCPin* ccPin)
     if (!first) {
         // finish creating the command.
         Inserts << " ON DUPLICATE KEY UPDATE ";
+        Inserts << " isCommandCenter=VALUES(isCommandCenter), isLaunchable=VALUES(isLaunchable), ";  // VEV_PI: flags were stuck after first insert
+        Inserts << " isProcess=VALUES(isProcess), isStorage=VALUES(isStorage), isECU=VALUES(isECU), ";
+        Inserts << " level=VALUES(level), latitude=VALUES(latitude), longitude=VALUES(longitude), ";
         Inserts << " schematicID=VALUES(schematicID), ";
         Inserts << " programType=VALUES(programType), ";
         Inserts << " launchTime=VALUES(launchTime), ";

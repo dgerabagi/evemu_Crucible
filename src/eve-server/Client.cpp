@@ -47,6 +47,7 @@
 #include "map/MapDB.h"
 #include "missions/MissionDataMgr.h"
 #include "npc/NPC.h"
+#include "GridStreamer.h"  // VEV_GATE_FIRE: vev::grid::NoteGateJump
 //#include "npc/Drone.h"
 //#include "npc/DroneAI.h"
 #include "station/StationDataMgr.h"
@@ -172,9 +173,15 @@ Client::~Client() {
                     this->services().Lookup <TradeService>("trademgr")->CancelTrade(this);
                 }
                 CharNoLongerInStation();
-                // remove char from station
-                sEntityList.GetStationByID(m_locationID)->RemoveItem(m_char);
+                // remove char from station — VEV_TEARDOWN_GUARD_B null-safe
+                StationItemRef vevDtorRef = sEntityList.GetStationByID(m_locationID);
+                if (vevDtorRef.get() != nullptr)
+                    vevDtorRef->RemoveItem(m_char);
             }
+            // VEV_TEARDOWN_GUARD_C sweep: purge this client from every station
+            // guest list regardless of believed state (stale stationIDs left
+            // freed pointers behind -> broadcast segfaults).
+            sEntityList.RemoveGuestFromAllStations(this);
         }
         // remove fleet data, remove char from ItemFactory cache, save SP and set logout time
         m_char->LogOut();
@@ -392,6 +399,10 @@ void Client::ProcessClient() {
                     case Player::State::Login: {
                         _log(CLIENT__TIMER, "ProcessClient()::IsDocked()::CheckState():  case: Login");
                         m_login = false;
+                        // See A338 §Fix5 — send module online effects after login completes.
+                        // GenericModule::Online() docked path suppresses OnGodmaShipEffect (notify=false during login).
+                        // The client needs effectID=16 to show modules as online in the fitting window.
+                        m_ship->SendOnlineModuleEffects();
                     } break;
                     case Player::State::Idle: {
                         _log(CLIENT__TIMER, "ProcessClient()::IsDocked()::CheckState():  case: Idle");
@@ -494,6 +505,10 @@ void Client::ProcessClient() {
                         WarpIn();
                     }
                     m_ship->GetModuleManager()->UpdateChargeQty();  //  <<<< huge hack here....cant find another way to do it yet.
+                    // See A338 §Fix5 — send module online effects after login completes.
+                    // Same pattern as UndockFromStation: client needs OnGodmaShipEffect (effectID=16)
+                    // for all online modules to render turret models and show modules as online.
+                    m_ship->SendOnlineModuleEffects();
                     } break;
                 case Player::State::LoginWarp: {
                     _log(CLIENT__TIMER, "ProcessClient()::CheckState():  case: LoginWarp");
@@ -1447,6 +1462,7 @@ void Client::StargateJump(uint32 fromGate, uint32 toGate) {
     pShipSE->DestinyMgr()->SendJumpOut(fromGate);
     //  show gate animation in from gate.   -working -allan 15Nov15
     pShipSE->DestinyMgr()->SendGateActivity(fromGate);
+    vev::grid::NoteGateJump(fromGate, toGate);  // VEV_GATE_FIRE: light the gate on a human jump too
 
     StaticData toData = StaticData();
     if (!sDataMgr.GetStaticInfo(toGate, toData)) {
@@ -1800,7 +1816,7 @@ void Client::RemoveMissionItem(uint16 typeID, uint32 qty)
         iRef = sItemFactory.GetStationRef(m_locationID)->GetMyInventory()->GetByTypeFlag(typeID, flagHangar);
         if (iRef.get() != nullptr) {
             if (count < iRef->quantity()) {
-                iRef->AlterQuantity(count, true);
+                iRef->AlterQuantity(-count, true);  // See A382 — must negate to subtract
                 count = 0;
             } else {
                 count -= iRef->quantity();
@@ -1813,7 +1829,7 @@ void Client::RemoveMissionItem(uint16 typeID, uint32 qty)
         iRef = GetShip()->GetMyInventory()->GetByTypeFlag(typeID, flagCargoHold);
         if (iRef.get() != nullptr){
             if (count < iRef->quantity()) {
-                iRef->AlterQuantity(count, true);
+                iRef->AlterQuantity(-count, true);  // See A382 — must negate to subtract
                 count = 0;
             } else {
                 count -= iRef->quantity();
@@ -1883,6 +1899,10 @@ bool Client::IsMissionComplete(MissionOffer& data)
         case Mission::Type::Trade: {
         } break;
         case Mission::Type::Mining: {
+            // Mining: same as Courier — player must be at destination with required ore. See A382.
+            if (m_locationID == data.destinationID)
+                if (ContainsTypeQty(data.courierTypeID, data.courierAmount))
+                    return true;
         } break;
         case Mission::Type::Research: {
         } break;
@@ -1917,7 +1937,10 @@ void Client::ChannelLeft(LSCChannel *chan) {
 void Client::CharNoLongerInStation() {
     // clear station data
     // remove client from station guest list
-    sEntityList.GetStationByID(m_stationData.stationID)->RemoveGuest(this);
+    // VEV_TEARDOWN_GUARD_A: empty ref (stale stationID at teardown) deref'd here
+    StationItemRef vevGuardRef = sEntityList.GetStationByID(m_stationData.stationID);
+    if (vevGuardRef.get() != nullptr)
+        vevGuardRef->RemoveGuest(this);
     m_system->SetDockCount(this, false);
     OnCharNoLongerInStation ocnis;
         ocnis.charID = m_char->itemID();

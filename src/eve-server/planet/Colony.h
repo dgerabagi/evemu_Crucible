@@ -39,6 +39,7 @@ class PlanetMgr;
 class Colony {
 public:
     Colony(EVEServiceManager& mgr, Client* pClient, SystemEntity* pSE);
+    Colony(EVEServiceManager& mgr, uint32 charID, SystemEntity* pSE);   // VEV_PI_CHARID
     ~Colony();
 
     void Init();
@@ -51,9 +52,12 @@ public:
     void AbandonColony();
 
     void Process();
+    void ForceProductionCycles(int cycles);   // VEV_PI_ECU (test tick)
+    int  RearmECUs(int cycles);               // VEV_PI_REARM: renew expired ECU programs (the pi_rearm verb)
     void ProcessECUs(bool& save);
     void ProcessPlants(bool& save);
 
+    void HaulExport(uint32 destLocationID, uint32 destFlag, double& outValue, double& outTax, int& outCount, std::string& manifest);  // VEV_PI_LOGI2 / VEV_PIEXPORT
     void RemovePin(uint32 pinID);
     void RemoveLink(uint32 src, uint32 dest);
     void RemoveRoute(uint16 routeID);
@@ -80,6 +84,7 @@ public:
     void PrioritizeRoute(uint16 routeID, uint8 priority);
 
     uint32 GetOwner();
+    uint32 GetLastCreatedPin() { return m_lastCreatedPin; }   // VEV_PI_BUILD
 
     PyRep* GetColony();
     PyTuple* GetPins();
@@ -97,6 +102,8 @@ private:
     PlanetSE* m_pSE;
     PI_CCPin* ccPin;
     Client* m_client;
+    uint32 m_ownerID;       // VEV_PI_CHARID: owner identity, valid even when m_client==nullptr (headless)
+    uint32 m_lastCreatedPin = 0;   // VEV_PI_BUILD: itemID of the most recent CreatePin
 
     Timer m_colonyTimer;
 

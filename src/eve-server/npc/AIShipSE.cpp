@@ -96,12 +96,30 @@ AIShipSE::~AIShipSE() {
     sEntityList.RemoveAIShip(m_charID);
 }
 
+// VEV_JUMP_GRACE: arm the post-jump grace suite — mirror of Client.cpp:912-920.
+void AIShipSE::StartJumpGrace() {
+    if (m_destiny != nullptr) m_destiny->Cloak();              // gate cloak (also breaks on warp)
+    m_jumpCloakTimer.Start(Player::Timer::JumpCloak);          // 30s expiry
+    SetInvul(true);                                            // jump invuln (attacker AI skips IsInvul)
+    m_jumpInvulTimer.Start(Player::Timer::JumpInvul);          // 15s expiry
+}
+
 void AIShipSE::Process() {
     if (m_killed)
         return;
 
     /* Enable base call to Process Targeting and Movement */
     SystemEntity::Process();
+
+    // VEV_JUMP_GRACE: expire the post-jump cloak + invuln (AI ships have no Client::ProcessClient).
+    if (m_jumpCloakTimer.Enabled() && m_jumpCloakTimer.Check(false)) {
+        m_jumpCloakTimer.Disable();
+        if (m_destiny != nullptr && m_destiny->IsCloaked()) m_destiny->UnCloak();
+    }
+    if (m_jumpInvulTimer.Enabled() && m_jumpInvulTimer.Check(false)) {
+        m_jumpInvulTimer.Disable();
+        SetInvul(false);
+    }
 
     // Shield recharge on 5s tick (simplified — no pilot required)
     if (m_processTimer.Check()) {
@@ -401,6 +419,23 @@ uint8 AIShipSE::LaunchAllDrones(const FactionData& data) {
         inv->LoadContents();
     std::vector<InventoryItemRef> bay;
     inv->GetItemsByFlag(flagDroneBay, bay);
+    // VEV_DRONE_RELOAD (2026-06-17): the in-memory bay can read EMPTY while the DB
+    // bay holds drones (a scoop recovery or fresh fit while the Inventory was
+    // cached) -- ContentsLoaded() short-circuits LoadContents(), so the drones stay
+    // invisible and launch fails "empty bay" (the recurring combat-pilot blocker).
+    // Pull them straight from the DB via ItemFactory so a restocked bay launches.
+    if (bay.empty()) {
+        DBQueryResult dres;
+        if (sDatabase.RunQuery(dres,
+            "SELECT itemID FROM entity WHERE locationID = %u AND flag = %u",
+            GetSelf()->itemID(), (uint32)flagDroneBay)) {
+            DBResultRow drow;
+            while (dres.GetRow(drow)) {
+                InventoryItemRef dRef = sItemFactory.GetItemRef(drow.GetUInt(0));
+                if (dRef.get() != nullptr) bay.push_back(dRef);
+            }
+        }
+    }
     uint8 launched = 0;
     for (InventoryItemRef dRef : bay) {
         if (dRef.get() == nullptr)
@@ -465,6 +500,47 @@ void AIShipSE::CleanupDrones() {
         }
     }
     m_drones.clear();
+}
+
+// VEV_JUMP_CLEANUP: the ONE pre-delete teardown seam for the cross-system jump. The jump
+// SafeDeletes this SE and builds a new one; anything holding in-memory relationships to OTHER
+// entities (drones in space, EWAR applied to victims) MUST be undone here, while this SE is
+// still valid and still in its OLD system. Mirrors the Despawn()/Killed() cleanup the jump bypassed.
+void AIShipSE::OnPreJumpDestroy() {
+    ReturnAllDrones();    // scoop drones to bay (+decrement bandwidth) -- else orphaned DroneSEs in
+                          //   the old system dangle their owner ptr -> use-after-free crash.
+    ClearAppliedEwar();   // reverse webs/scrams so victims aren't left perma-slowed/scrambled.
+}
+
+// VEV_JUMP_CLEANUP: reverse every EWAR effect this ship applied to others (resolved in the
+// OLD system, so must run before RemoveEntity). Null-guarded; a dead/departed target is skipped.
+void AIShipSE::ClearAppliedEwar() {
+    for (auto& cur : m_appliedWebs) {
+        SystemEntity* pSE = (m_system != nullptr) ? m_system->GetSE(cur.first) : nullptr;
+        if (pSE != nullptr && pSE->DestinyMgr() != nullptr && cur.second.get() != nullptr)
+            pSE->DestinyMgr()->WebbedMe(cur.second, false);   // undo the m_maxShipSpeed multiply
+    }
+    for (auto& cur : m_appliedScrams) {
+        SystemEntity* pSE = (m_system != nullptr) ? m_system->GetSE(cur.first) : nullptr;
+        if (pSE != nullptr && pSE->GetSelf().get() != nullptr)
+            pSE->GetSelf()->SetAttribute(AttrWarpScrambleStatus, 0);
+    }
+    m_appliedWebs.clear();
+    m_appliedScrams.clear();
+}
+
+void AIShipSE::RecordAppliedWeb(uint32 targetID, InventoryItemRef modRef) { m_appliedWebs[targetID] = modRef; }
+void AIShipSE::RecordAppliedScram(uint32 targetID) { m_appliedScrams[targetID] = true; }
+
+// VEV_JUMP_CLEANUP: snapshot/restore per-SE state that must SURVIVE a jump (the recreate
+// would otherwise reset it). Add a field to JumpCarry + a line in each when it must persist.
+AIShipSE::JumpCarry AIShipSE::ExportJumpState() const {
+    JumpCarry c;
+    c.pendingDockStationID = m_pendingDockStationID;
+    return c;
+}
+void AIShipSE::ImportJumpState(const JumpCarry& carry) {
+    m_pendingDockStationID = carry.pendingDockStationID;
 }
 
 void AIShipSE::Despawn() {

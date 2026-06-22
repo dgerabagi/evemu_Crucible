@@ -221,6 +221,16 @@ bool TargetManager::StartTargeting(SystemEntity *tSE, float lockTime, uint8 maxL
         return false;
     }
 
+    // VEV_TARGET_MGR_GUARD (2026-06-20, gdb-confirmed): not every SystemEntity has a TargetManager
+    // (m_targMgr is nullptr for non-combatant / transient targets). An AI drone_engage on such a
+    // target reached the unguarded tSE->TargetMgr()->TargetedAdd() below -> deref NULL this -> SIGSEGV
+    // the shared server (drone_engage charID 90001161 targetID 750000686). Can't lock a non-targetable
+    // entity: reject cleanly (StartTargeting returns bool; the drone AI then logs + goes idle).
+    if (tSE->TargetMgr() == nullptr) {
+        _log(TARGET__TRACE, " %s(%u): target %s(%u) not targetable (no TargetManager); ignoring.", mySE->GetName(), mySE->GetID(), tSE->GetName(), tSE->GetID());
+        return false;
+    }
+
     TargetEntry *te = new TargetEntry();
         te->state = TargMgr::State::Locking;
         te->timer.Start(lockTime);

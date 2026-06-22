@@ -82,6 +82,8 @@ public:
     void Process();
 
     bool MakeDungeon(CosmicSignature& sig, uint32 dungeonID = 0);
+    // VEV_ANOM_WAVES: SpawnMgr signals here when an anomaly's last wave is cleared.
+    void NotifyAnomalyCleared(uint16 bubbleID);
 
 protected:
     ManagerDB m_db;

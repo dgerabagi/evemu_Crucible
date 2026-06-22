@@ -46,6 +46,7 @@ public:
     virtual void                SetOffline();
 
     virtual void                Online();
+    void                        VevDeployHeadless(uint32 anchorID);  // VEV_POS0: headless deploy+online
     virtual void                Operating();
     virtual void                Reinforced();
 
@@ -84,6 +85,7 @@ public:
     bool SendFuelNotifications()                        { return m_tdata.sendFuelNotifications; }
     void SetShowInCalendar(bool set)                    { m_tdata.showInCalendar = set; }
     void SetSendFuelNotifications(bool set)             { m_tdata.sendFuelNotifications = set; }
+    void VevReonline();  // VEV_POS_FUEL: refuel->re-online a fuel-starved tower
 
     void GetTowerData(EVEPOS::TowerData& tData)         { tData = m_tdata; }
 
@@ -116,6 +118,7 @@ public:
 
 protected:
     EVEPOS::TowerData m_tdata;
+    int64 m_vevNextFuel;  // VEV_POS_FUEL in-memory throttle
 
     SystemEntity* m_pShieldSE;
     //POS_AI* m_ai;

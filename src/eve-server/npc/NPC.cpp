@@ -35,6 +35,8 @@
 #include "system/Container.h"
 #include "system/Damage.h"
 #include "system/SystemManager.h"
+#include "account/AccountService.h"  // VEV_SIM_BOUNTY (TransferFunds/corpCONCORD/Journal for AI-pilot bounty)
+#include "npc/AIShipSE.h"  // VEV_FIX_BOUNTY_INC
 
 
 NPC::NPC(InventoryItemRef self, EVEServiceManager& services, SystemManager* system, const FactionData& data, SpawnMgr* spawnMgr)
@@ -307,6 +309,7 @@ void NPC::Killed(Damage &damage) {
     uint32 killerID = 0;
     Client* pClient(nullptr);
     SystemEntity *killer(damage.srcSE);
+    uint32 aiDroneOwner = 0;   // VEV_SIM_BOUNTY_DRONE: phantom charID owning the killing drone
 
     if (killer->HasPilot()) {
         pClient = killer->GetPilot();
@@ -314,7 +317,13 @@ void NPC::Killed(Damage &damage) {
     } else if (killer->IsDroneSE()) {
         pClient = sEntityList.FindClientByCharID( killer->GetSelf()->ownerID() );
         if (pClient == nullptr) {
-            sLog.Error("NPC::Killed()", "killer == IsDrone and pPlayer == nullptr");
+            // VEV_SIM_BOUNTY_DRONE: a drone owned by a phantom AI pilot (no Client*).
+            // The stock code logged an error and paid nothing -- so AI pilots that
+            // killed with DRONES (the correct anti-frigate tool for anomaly ratting)
+            // earned ZERO. Capture the owner charID and credit it via the
+            // VEV_SIM_BOUNTY path below; the drone's ownerID IS the phantom charID.
+            // EVE-real: drone kills pay the drone's owner.
+            aiDroneOwner = killer->GetSelf()->ownerID();
         } else {
             killerID = pClient->GetCharacterID();
         }
@@ -333,6 +342,27 @@ void NPC::Killed(Damage &damage) {
         if (m_system->GetSystemSecurityRating() > 0)
             AwardSecurityStatus(m_self, pClient->GetChar().get());  // this awards secStatusChange for npcs in empire space
     }
+    // ===================== VEV_SIM_BOUNTY (conv9 sim-layer recovery #4) =====================
+    // AI-pilot (AIShipSE phantom, NO Client*) killer bounty credit BY charID.
+    // Mirrors DynamicSystemEntity::AwardBounty (system/SystemEntity.cpp:861) non-fleet immediate
+    // path; reference design = eve.js killmailTracker.js:321 resolveBountyPayout (NOT ported).
+    else {
+        // VEV_SIM_BOUNTY[_DRONE]: credit the phantom that landed the kill -- either
+        // an AIShipSE directly, or (new) the phantom owner of the killing drone.
+        AIShipSE* pKillerAI = killer->GetAIShipSE();  // non-null ONLY for an AIShipSE
+        uint32 payCharID = (pKillerAI != nullptr) ? pKillerAI->GetCharID() : aiDroneOwner;
+        if (payCharID != 0) {
+            double bounty = m_self->GetAttribute(AttrEntityKillBounty).get_double();
+            bounty *= sConfig.rates.npcBountyMultiply;
+            if (bounty >= 1) {
+                std::string reason = "Bounty for killing a pirate (AI pilot)";
+                AccountService::TransferFunds(
+                    corpCONCORD, payCharID, bounty, reason.c_str(),
+                    Journal::EntryType::BountyPrize, -GetTypeID());
+            }
+        }
+    }
+    // ===================== end VEV_SIM_BOUNTY =====================
 
     GPoint wreckPosition = m_destiny->GetPosition();
     if (wreckPosition.isNaN()) {

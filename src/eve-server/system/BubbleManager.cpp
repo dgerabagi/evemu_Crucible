@@ -195,6 +195,18 @@ void BubbleManager::NewBubbleCenter(GVector shipVelocity, GPoint &newCenter) {
     newCenter += (shipVelocity * (BUBBLE_RADIUS_METERS /2));
 }
 
+// VEV_BUBBLE_PURGE: sweep a dying entity out of EVERY bubble's maps. Remove()
+// only cleans the bubble m_bubble points at — stale after bubble transfers.
+void BubbleManager::RemoveFromAllBubbles(SystemEntity* ent)
+{
+    if (ent == nullptr)
+        return;
+    uint32 itemID(ent->GetID());
+    for (auto cur : m_bubbles)
+        if (cur != nullptr)
+            cur->PurgeEntity(itemID);
+}
+
 void BubbleManager::Remove(SystemEntity *ent) {
     // suns, planets and moons arent in bubbles
     // if (ent->IsStaticEntity())

@@ -369,6 +369,7 @@ static json handleAnalyze(const json& payload) {
     if (moduleID == 0)
         return json{{"ok", false}, {"raw", "no Data/Relic Analyzer fitted"}};
     json ap = json{{"sigID", sigID}, {"moduleID", moduleID}};
+    if (payload.contains("containerID")) ap["containerID"] = payload.at("containerID").get<uint32_t>();  // VEV_XPL_PER_CAN
     uint32_t rid = enqueueAICommandLID(characterID, "analyze", ap.dump());
     bool ok = false;
     std::string raw = pollAIResult(rid, 5000, &ok);
@@ -2182,6 +2183,7 @@ static json handleGetAssets(const json& payload) {
         "LEFT JOIN invGroups g ON g.groupID = t.groupID "
         "LEFT JOIN invMetaTypes mt ON mt.typeID = e.typeID "
         "WHERE e.ownerID = %u AND e.flag = 5 "
+        /* VEV_ASSETS_ACTIVE_SHIP */ "AND e.locationID = (SELECT shipID FROM chrCharacters WHERE characterID = e.ownerID) "
         "  AND (g.categoryID IS NULL OR g.categoryID <> 6) "
         "GROUP BY t.typeID, t.typeName, groupName, metaGroup "
         "ORDER BY groupName, t.typeName",
@@ -2631,6 +2633,7 @@ static json handleGetCharacterAssets(const json& payload) {
         "WHERE e.ownerID = %u AND e.flag IN (4,5) "
         "  AND (g.categoryID IS NULL OR g.categoryID <> 6) "
         "  AND (e.flag <> 4 OR %u = 0 OR e.locationID = %u) "
+        /* VEV_ASSETS_ACTIVE_SHIP */ "  AND (e.flag <> 5 OR e.locationID = (SELECT shipID FROM chrCharacters WHERE characterID = e.ownerID)) "
         "GROUP BY e.flag, t.typeID, t.typeName, groupName, metaGroup "
         "ORDER BY groupName, t.typeName",
         characterID, stationID, stationID))

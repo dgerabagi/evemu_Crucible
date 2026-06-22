@@ -341,6 +341,14 @@ bool BeltSE::LoadExtras() {
     if (m_bubble == nullptr)
         sBubbleMgr.Add(this);
 
+    // VEV_BELT_BUBBLE_GUARD (2026-06-20, gdb-confirmed sys 30003074 belt 40195381): sBubbleMgr.Add()
+    // returns WITHOUT assigning a bubble when GetBubble() yields nullptr (degenerate belt center on
+    // on-demand system boot via GridStreamer). The old unconditional m_bubble->SetBelt() then derefs
+    // this==0x0 (SystemBubble::SetBelt writes m_belt=true through NULL) -> SIGSEGV the shared server.
+    if (m_bubble == nullptr) {
+        _log(DESTINY__BUBBLE_DEBUG, "BeltSE::LoadExtras() - belt %u has no bubble; skipping SetBelt to avoid NULL deref.", GetID());
+        return false;
+    }
     m_bubble->SetBelt(m_self);
     _log(DESTINY__BUBBLE_DEBUG, "BeltSE::LoadExtras() - IsBelt set to true for bubble %u.", m_bubble->GetID() );
     return true;
@@ -368,6 +376,14 @@ bool StargateSE::LoadExtras() {
     if (m_bubble == nullptr)
         sBubbleMgr.Add(this);
 
+    // VEV_GATE_BUBBLE_GUARD (2026-06-20): identical twin of VEV_BELT_BUBBLE_GUARD. sBubbleMgr.Add()
+    // returns WITHOUT assigning a bubble when GetBubble() yields nullptr (degenerate position during
+    // on-demand system boot via GridStreamer). The unconditional m_bubble->SetGate() then derefs
+    // NULL -> SIGSEGV the shared server. Skip gate registration cleanly when un-bubbled.
+    if (m_bubble == nullptr) {
+        _log(DESTINY__BUBBLE_DEBUG, "StargateSE::LoadExtras() - gate %u has no bubble; skipping SetGate to avoid NULL deref.", GetID());
+        return false;
+    }
     m_bubble->SetGate(true);
     _log(DESTINY__BUBBLE_DEBUG, "StargateSE::LoadExtras() - IsGate set to true for bubble %u.", m_bubble->GetID() );
     m_jumps = SystemDB::ListJumps(m_self->itemID());
@@ -750,9 +766,11 @@ PyDict *DynamicSystemEntity::MakeSlimItem() {
 void DynamicSystemEntity::EncodeDestiny( Buffer& into )
 {
     using namespace Destiny;
+    uint8 mode = m_destiny->GetState();
+
     BallHeader head = BallHeader();
         head.entityID = m_self->itemID();
-        head.mode = Ball::Mode::STOP;
+        head.mode = mode;
         head.radius = m_radius;
         head.posX = x();
         head.posY = y();
@@ -774,9 +792,50 @@ void DynamicSystemEntity::EncodeDestiny( Buffer& into )
         data.velZ = m_destiny->GetVelocity().z;
         data.speedfraction = m_destiny->GetSpeedFraction();
     into.Append( data );
-    STOP_Struct main;
-        main.formationID = 0xFF;
-    into.Append( main );
+    // See A371 Bug16 — encode actual ball mode so clients simulate movement correctly.
+    switch (mode) {
+        case Ball::Mode::WARP: {
+            GPoint target = m_destiny->GetTargetPoint();
+            WARP_Struct warp;
+                warp.formationID = 0xFF;
+                warp.targX = target.x;
+                warp.targY = target.y;
+                warp.targZ = target.z;
+                warp.speed = m_destiny->GetWarpSpeed();
+                warp.effectStamp = -1;
+                warp.followRange = 0;
+                warp.followID = 0;
+            into.Append( warp );
+        } break;
+        case Ball::Mode::FOLLOW: {
+            FOLLOW_Struct follow;
+                follow.followID = m_destiny->GetTargetID();
+                follow.followRange = m_destiny->GetFollowDistance();
+                follow.formationID = 0xFF;
+            into.Append( follow );
+        } break;
+        case Ball::Mode::ORBIT: {
+            ORBIT_Struct orbit;
+                orbit.targetID = m_destiny->GetTargetID();
+                orbit.followRange = m_destiny->GetFollowDistance();
+                orbit.formationID = 0xFF;
+            into.Append( orbit );
+        } break;
+        case Ball::Mode::GOTO: {
+            GPoint target = m_destiny->GetTargetPoint();
+            GOTO_Struct go;
+                go.formationID = 0xFF;
+                go.x = target.x;
+                go.y = target.y;
+                go.z = target.z;
+            into.Append( go );
+        } break;
+        default: {
+            STOP_Struct main;
+                main.formationID = 0xFF;
+            into.Append( main );
+        } break;
+    }
 
     _log(SE__DESTINY, "DSE::EncodeDestiny(): %s - id:%lli, mode:%u, flags:0x%X", GetName(), head.entityID, head.mode, head.flags);
 }

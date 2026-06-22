@@ -212,7 +212,7 @@ void LSCChannel::SendMessage(Client * c, const char * message, bool self/*false*
     sEntityList.Multicast("OnLSC", GetTypeString(), &answer, mct);
 
     // See A321 §4.7 — Persist messages on AI channel so Python agents can read them
-    if (m_channelID == 100) {
+    if (m_channelID == 100 || m_channelID >= 30000000) { // VEV_LOCAL_BRIDGE
         std::string escapedName, escapedMsg;
         sDatabase.DoEscapeString(escapedName, std::string(c->GetName()));
         sDatabase.DoEscapeString(escapedMsg, std::string(message));

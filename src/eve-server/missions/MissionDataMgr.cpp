@@ -516,6 +516,10 @@ void MissionDataMgr::CreateMissionOffer(uint8 typeID, uint8 level, uint8 raceID,
                 for (auto it = itr.first; it != itr.second; ++it)
                     cVec.push_back(it->second);
             }
+            if (cVec.empty()) {
+                _log(AGENT__DEBUG, "No courier data for level %u (important=%s).", level, important?"true":"false");
+                return;
+            }
             cData = cVec[MakeRandomInt(0, (cVec.size() -1))];
             // verify mission race acceptable
             if ((cData.raceID) and ((cData.raceID & raceID) != raceID)) {
@@ -552,6 +556,11 @@ void MissionDataMgr::CreateMissionOffer(uint8 typeID, uint8 level, uint8 raceID,
                 auto itr = m_mining.equal_range(level);
                 for (auto it = itr.first; it != itr.second; ++it)
                     cVec.push_back(it->second);
+            }
+            if (cVec.empty()) {
+                _log(AGENT__DEBUG, "No mining data for level %u (important=%s), falling back to Courier.", level, important?"true":"false");
+                CreateMissionOffer(Mission::Type::Courier, level, raceID, important, data);
+                return;
             }
             cData = cVec[MakeRandomInt(0, (cVec.size() -1))];
 

@@ -122,3 +122,4 @@ sql.tar.gz
 .idea
 CMakeSettings.json
 log.ini
+*.bak*

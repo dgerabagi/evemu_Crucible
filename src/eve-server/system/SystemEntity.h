@@ -236,7 +236,7 @@ public:
     double                      GetRadius()             { return m_radius; }
     uint32                      GetLocationID()         { return m_self->locationID(); }
     const char*                 GetName() const         { return m_self->name(); }
-    const GPoint&               GetPosition() const     { return m_self->position(); }
+    virtual const GPoint& GetPosition() const { return m_self->position(); }   // VEV_POSITION_DESYNC: virtual so AIShipSE overrides to read the LIVE destiny store
     void                  SetPosition(const GPoint &pos){ m_self->SetPosition(pos); }
     void                        SetRadius(double radius){ m_self->SetRadius(radius); }
     void                        Rename(const char *name){ m_self->Rename(name); }
