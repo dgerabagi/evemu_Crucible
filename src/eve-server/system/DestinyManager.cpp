@@ -112,7 +112,7 @@ mvPacket(nullptr)
     m_velocity = GVector( NULL_ORIGIN );
     m_targetPoint = GPoint( NULL_ORIGIN );
     m_shipHeading = GVector( NULL_ORIGIN );
-    m_visualHeading = GVector( NULL_ORIGIN );   //VEV_VISUAL_INERTIA
+    m_visualHeading = GVector( 1.0, 0.0, 0.0 );   //VEV_VISUAL_INERTIA: seed facing EAST so a fresh ball (post-jump) eases from a real heading instead of snapping
     m_targetHeading = GVector( NULL_ORIGIN );
 
     m_radius = mySE->GetRadius();
@@ -1263,13 +1263,12 @@ void DestinyManager::Turn() {   // tracking within 900m for Frigates, 1k4m for B
 // (60-agility)/10 deg/tic model Turn() uses). GetHeading() returns m_visualHeading; nothing in
 // movement reads it (only GridStreamer + a debug command do), so there is zero movement effect.
 void DestinyManager::UpdateVisualHeading() {
-    // m_shipHeading must be a valid unit heading (skip pre-init / stopped-with-no-heading)
+    // m_shipHeading must be a valid unit heading (skip pre-init / stopped-with-no-heading).
+    // m_visualHeading is seeded EAST in the ctor, so a fresh ball (post-jump arrival) eases from a
+    // real facing toward its first align target instead of snapping (curator: ships must not snap
+    // to vectors; a fixed east default is fine — EVE-real exactness not required here).
     if (m_shipHeading.dotProduct(m_shipHeading) < 1.0e-6f)
         return;
-    if (m_visualHeading.dotProduct(m_visualHeading) < 1.0e-6f) {   // fresh ball: adopt instantly
-        m_visualHeading = m_shipHeading;
-        return;
-    }
     float dot = m_visualHeading.dotProduct(m_shipHeading);
     if (dot > 0.99995f) {                          // aligned: lock to the movement heading
         m_visualHeading = m_shipHeading;
