@@ -2790,7 +2790,8 @@ static json handleGetMarketOrders(const json& payload) {
     DBQueryResult sres;
     if (!sDatabase.RunQuery(sres,
         "SELECT o.price, o.volRemaining, o.minVolume, o.jumps, o.duration, o.stationID, "
-        "       COALESCE(s.stationName, CONCAT('Station ', o.stationID)) AS stationName, o.solarSystemID "
+        "       COALESCE(s.stationName, CONCAT('Station ', o.stationID)) AS stationName, o.solarSystemID, "
+        "       o.ownerID, CAST(o.isCorp AS UNSIGNED) AS isCorp "
         "FROM mktOrders o LEFT JOIN staStations s ON s.stationID=o.stationID "
         "WHERE o.typeID=%u AND o.regionID=%u AND CAST(o.bid AS UNSIGNED)=0 "
         "ORDER BY o.price ASC LIMIT 100", typeID, regionID))
@@ -2808,13 +2809,16 @@ static json handleGetMarketOrders(const json& payload) {
             {"stationID",     srow.GetUInt(5)},
             {"stationName",   srow.GetText(6) ? std::string(srow.GetText(6)) : ""},
             {"solarSystemID", srow.GetUInt(7)},
+            {"ownerID",       srow.GetUInt(8)},                 // VEV_CORP_FILTER
+            {"isCorp",        srow.GetUInt(9) != 0},            // VEV_CORP_FILTER
         });
     }
 
     DBQueryResult bres;
     if (!sDatabase.RunQuery(bres,
         "SELECT o.price, o.volRemaining, o.minVolume, o.jumps, o.duration, o.stationID, "
-        "       COALESCE(s.stationName, CONCAT('Station ', o.stationID)) AS stationName, o.solarSystemID "
+        "       COALESCE(s.stationName, CONCAT('Station ', o.stationID)) AS stationName, o.solarSystemID, "
+        "       o.ownerID, CAST(o.isCorp AS UNSIGNED) AS isCorp "
         "FROM mktOrders o LEFT JOIN staStations s ON s.stationID=o.stationID "
         "WHERE o.typeID=%u AND o.regionID=%u AND CAST(o.bid AS UNSIGNED)=1 "
         "ORDER BY o.price DESC LIMIT 100", typeID, regionID))
@@ -2832,6 +2836,8 @@ static json handleGetMarketOrders(const json& payload) {
             {"stationID",     brow.GetUInt(5)},
             {"stationName",   brow.GetText(6) ? std::string(brow.GetText(6)) : ""},
             {"solarSystemID", brow.GetUInt(7)},
+            {"ownerID",       brow.GetUInt(8)},                 // VEV_CORP_FILTER
+            {"isCorp",        brow.GetUInt(9) != 0},            // VEV_CORP_FILTER
         });
     }
 
@@ -2857,6 +2863,31 @@ static json handleMarketBuy(const json& payload) {
     enqueueAICommand(characterID, "login_docked", "{}");
     const bool ok = enqueueAICommand(characterID, "buy_from_sell_order",
         json{{"typeID", typeID}, {"quantity", quantity}}.dump());
+    return json{{"ok", ok}, {"queued", ok}};
+}
+
+// VEV_PLACE_SELL — client-driven CORP sell order (de-fakes the 2D 'Sell' button). Clones
+// handleMarketBuy: login_docked (idempotent) so the pilot is a docked phantom the place_sell_order
+// verb accepts, then enqueue the PROVEN EntityList place_sell_order (corp-hangar listing, Crucible
+// broker fee from the corp wallet). Args snake_case to match the verb's parser. params:
+// { characterID, typeID, quantity, price, stationID?, durationDays?, minVolume?, range? }.
+static json handlePlaceSellOrder(const json& payload) {
+    if (!payload.is_object() || !payload.contains("characterID") || !payload.contains("typeID") ||
+        !payload.contains("quantity") || !payload.contains("price")) {
+        throw std::runtime_error("payload requires { characterID, typeID, quantity, price, stationID?, durationDays? }");
+    }
+    uint32_t characterID = payload.at("characterID").get<uint32_t>();
+    uint32_t typeID      = payload.at("typeID").get<uint32_t>();
+    uint32_t quantity    = payload.at("quantity").get<uint32_t>();
+    double   price       = payload.at("price").get<double>();
+    if (quantity == 0) quantity = 1;
+    json verbArgs = {{"type_id", typeID}, {"quantity", quantity}, {"price", price}};
+    if (payload.contains("stationID"))    verbArgs["station_id"]    = payload.at("stationID").get<uint32_t>();
+    if (payload.contains("durationDays")) verbArgs["duration_days"] = payload.at("durationDays").get<uint32_t>();
+    if (payload.contains("minVolume"))    verbArgs["min_volume"]    = payload.at("minVolume").get<uint32_t>();
+    if (payload.contains("range"))        verbArgs["range"]         = payload.at("range").get<int>();
+    enqueueAICommand(characterID, "login_docked", "{}");
+    const bool ok = enqueueAICommand(characterID, "place_sell_order", verbArgs.dump());
     return json{{"ok", ok}, {"queued", ok}};
 }
 
@@ -7544,6 +7575,7 @@ static const std::unordered_map<std::string, HandlerFn>& handlerTable() {
         {"getMarketTypes",       handleGetMarketTypes},
         {"getMarketOrders",      handleGetMarketOrders},
         {"marketBuy",            handleMarketBuy},
+        {"placeSellOrder",       handlePlaceSellOrder},   // VEV_PLACE_SELL
         {"getSignatures",        handleGetSignatures},    // VEV_XPL_SCAN
         {"warpToSignature",      handleWarpToSignature},  // VEV_XPL_SCAN
         {"analyze",              handleAnalyze},          // VEV_XPL_SCAN
