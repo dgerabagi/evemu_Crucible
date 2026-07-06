@@ -942,6 +942,9 @@ struct VevToggleState {
     std::string name;
 };
 static std::map<uint32, VevToggleState> s_vevToggleReg;
+// VEV_MINING_CYCLECLOCK: moduleID -> last ore-award time (ms). Mirrors ActiveModule::m_timer so the AI
+// mining path awards one cycle's yield per real AttrDuration, not on every activate_module call.
+static std::map<uint32, int64> s_vevMiningCycleMs;
 
 static void vevPersistShipAttr(uint32 itemID, uint16 attr, float val) {
     DBerror err;
@@ -1967,8 +1970,10 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                 resultMsg = "station is not in the current system - warp there first";
                 return false;
             }
+            // VEV_DOCK_DIST_PLAIN (Cycle 16, 2026-07-06): DistanceTo2 returns PLAIN meters
+            // (A371 Bug22.3); the old sqrt() shrank 11km to ~105m so this gate accepted a
+            // dock from ANYWHERE -- latent only because dock_at/Process pre-gate correctly.
             double dist = pAIShip->DistanceTo2(pStation);
-            dist = sqrt(dist);
             sLog.Cyan("   AICommandQueue", "dock proximity check: charID %u, station %u, distance %.0fm", charID, targetStationID, dist);
             // =================== VEV_DOCK_RANGE_RADIUS ===================
             // Docking range = station radius + 2500 m, MIRRORING dock_at's own
@@ -3674,24 +3679,32 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
             return false;
         }
 
-        // Calculate ore amount from one cycle
-        // VEV_PARTIAL_YIELD: an early-deactivated mining cycle awards prorated ore.
-        // The client sends fraction = elapsed/cycleDuration on mid-cycle stop;
-        // absent/1.0 = a full cycle. Clamped 0..1.
+        // VEV_MINING_CYCLECLOCK (2026-06-28): mirror the REAL laser's server timer. The 3D-client path
+        // (ActiveModule::Process -> m_timer fires every AttrDuration -> MiningLaser::ProcessCycle) extracts
+        // GetMiningVolume() ONCE per cycle, the first cycle yielding nothing (m_IsInitialCycle). The AI
+        // bypass copied the extraction but dropped the timer -> a full cycle's yield on EVERY call ->
+        // ~6x over-mine (CS-001 fakery). Award one cycle's miningAmount only when a real AttrDuration has
+        // elapsed since this module's last award (keyed by moduleID). The laser stays visually lit because
+        // SendSpecialEffect carries a full cycleDuration; light it on the first call so it shows at once.
         {
-            double yfrac = 1.0;
-            size_t fPos = p.find("\"fraction\"");
-            if (fPos != std::string::npos) {
-                size_t c = p.find(":", fPos);
-                if (c != std::string::npos) yfrac = atof(p.c_str() + c + 1);
-            }
-            if (yfrac < 0.0) yfrac = 0.0;
-            if (yfrac > 1.0) yfrac = 1.0;
-            miningAmount *= (float)yfrac;
-            if (miningAmount <= 0.01f) {
-                resultMsg = "cycle stopped (no yield)";
+            int64 nowMs = GetTimeMSeconds();
+            int64 cycleMs = (int64)(cycleDuration * 1000.0f);
+            if (cycleMs < 1000) cycleMs = 1000;
+            std::map<uint32, int64>::iterator itC = s_vevMiningCycleMs.find(moduleID);
+            if (itC == s_vevMiningCycleMs.end()) {
+                // first activation: start the cycle (no ore, mirror m_IsInitialCycle) but light the beam now
+                s_vevMiningCycleMs[moduleID] = nowMs;
+                pAIShip->DestinyMgr()->SendSpecialEffect(pAIShip->GetID(), moduleID, moduleTypeID, targetID,
+                    0, "effects.Mining", 0, 1, 1, (int32)(cycleDuration * 1000), 0, 0);
+                vev::grid::NoteMining(shipID, targetID);
+                resultMsg = "mining cycle started (yields at cycle completion)";
                 return true;
             }
+            if (nowMs - itC->second < cycleMs) {
+                resultMsg = "mining cycle in progress";   // a real laser awards at the cycle boundary, not before
+                return true;
+            }
+            itC->second = nowMs;   // a full AttrDuration elapsed -> award one cycle's miningAmount below
         }
         float oreAmount = miningAmount / oreVolume;
         if (oreAmount > roidQuantity)
@@ -4164,7 +4177,36 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         // VEV_LOGIN_INSPACE_NOOP: an already-in-space pilot must NOT be re-spawned /
         // repositioned — a redundant grid:enter (client reconnect) would teleport the
         // ship to a stale saved position near the station (and blank the client cargo).
-        if (HasAIShip(charID)) { resultMsg = "already in space"; return true; }
+        if (HasAIShip(charID)) {
+            // VEV_LOGIN_REATTACH: a live ball + a fresh login = a RECONNECT, not a
+            // redundant enter. The old bare return skipped the presence block, so the
+            // pilot stayed offline + out of Local while their ship floated (the strand).
+            // Re-attach presence; leave the ball exactly where it is.
+            if (!IsOnline(charID))
+                AddPhantomPlayer(charID);
+            DBQueryResult raRes;
+            if (sDatabase.RunQuery(raRes,
+                "SELECT c.characterName, c.corporationID, c.solarSystemID,"
+                " IFNULL(corp.allianceID,0), IFNULL(corp.warFactionID,0)"
+                " FROM chrCharacters c"
+                " LEFT JOIN crpCorporation corp ON corp.corporationID = c.corporationID"
+                " WHERE c.characterID = %u", charID))
+            {
+                DBResultRow raRow;
+                if (raRes.GetRow(raRow) && m_services != nullptr && raRow.GetUInt(2) != 0) {
+                    LSCService* raLsc = m_services->Lookup<LSCService>("LSC");
+                    if (raLsc != nullptr) {
+                        raLsc->CreateSystemChannel(raRow.GetUInt(2));
+                        LSCChannel* raChan = raLsc->GetChannelByID((int32)raRow.GetUInt(2));
+                        if (raChan != nullptr)
+                            raChan->JoinChannelAsPhantom(charID, raRow.GetText(0), raRow.GetUInt(1),
+                                                         raRow.GetUInt(3), raRow.GetUInt(4), 0);
+                    }
+                }
+            }
+            resultMsg = "already in space (presence re-attached)";
+            return true;
+        }
         vevRecalcPassives(charID);   // VEV_SIM_PASSIVES: apply fitted passives before the spawn reads attrs
         DBQueryResult charRes;
         if (!sDatabase.RunQuery(charRes,
@@ -4403,6 +4445,17 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
                     DBerror lperr;
                     sDatabase.RunQuery(lperr, "UPDATE entity SET x=%f, y=%f, z=%f WHERE itemID=%u",
                                        lp.x, lp.y, lp.z, pLogoutShip->GetSelf()->itemID());
+                    // VEV_LOGOUT_TEARDOWN: the ship LEAVES SPACE on logoff (EVE-real).
+                    // Without this the SE lived forever: relogin hit the already-in-space
+                    // no-op (stranded, no Local) and undock re-adopted the orphan at the
+                    // gate. Mirrors the dock handler teardown (Stop/RemoveEntity/erase).
+                    // login_in_space re-spawns at the position persisted above.
+                    pLogoutShip->DestinyMgr()->Stop();
+                    SystemManager* pLogoutSys = pLogoutShip->SystemMgr();
+                    if (pLogoutSys != nullptr)
+                        pLogoutSys->RemoveEntity(pLogoutShip);
+                    RemoveAIShip(charID);
+                    SafeDelete(pLogoutShip);
                 }
             }
             // Query character data for leave notifications
@@ -4993,6 +5046,42 @@ bool EntityList::ExecuteAICommand(uint32 charID, const char* command, const char
         iRef->Move(shipID, flagCargoHold, true);
         iRef->SaveItem();
         char buf[160]; snprintf(buf, sizeof(buf), "loaded corp %s (%u) into cargo", iRef->name(), itemID);
+        resultMsg = buf;
+        return true;
+    }
+
+    // -- withdraw_corp_item (corp-hangar doctrine model, 2026-06-22) ---------------
+    // WITHDRAW a corp-hangar stack into the pilot's PERSONAL ownership (the "Take from corp
+    // hangar" right). Mirror of deposit_corp_item with the ownership flip INVERTED: ChangeOwner
+    // TO the character (not the corp), so the stack lands char-owned at flagHangar (the pilot's
+    // personal station hangar) -- directly fittable (the fitter requires ownerID=char). NB:
+    // load_corp_item only moves to CARGO and keeps it corp-owned (invisible to the fitter); this
+    // is the missing pilot-facing draw for the corp-hangar fleet-doctrine loop.
+    if (cmd == "withdraw_corp_item") {
+        if (!IsPhantomPlayer(charID)) { resultMsg = "must be docked to withdraw from corp hangar"; return false; }
+        std::string p(params);
+        size_t idPos = p.find("\"itemID\"");
+        if (idPos == std::string::npos) { resultMsg = "missing 'itemID'"; return false; }
+        size_t colon = p.find(":", idPos);
+        uint32 itemID = (uint32)atol(p.c_str() + colon + 1);
+        if (itemID == 0) { resultMsg = "invalid itemID"; return false; }
+        DBQueryResult cr;
+        if (!sDatabase.RunQuery(cr, "SELECT stationID, corporationID FROM chrCharacters WHERE characterID = %u", charID)) {
+            resultMsg = "failed to query character"; return false;
+        }
+        DBResultRow crow;
+        if (!cr.GetRow(crow)) { resultMsg = "character not found"; return false; }
+        uint32 stationID = crow.GetUInt(0);
+        uint32 corpID = crow.GetUInt(1);
+        if (stationID == 0) { resultMsg = "not docked"; return false; }
+        InventoryItemRef iRef = sItemFactory.GetItemRef(itemID);
+        if (iRef.get() == nullptr) { resultMsg = "corp item not found"; return false; }
+        if (iRef->ownerID() != corpID) { resultMsg = "that item is not owned by your corp"; return false; }
+        if (iRef->locationID() != stationID) { resultMsg = "corp item is not at this station"; return false; }
+        iRef->ChangeOwner(charID, false);
+        iRef->Move(stationID, flagHangar, true);
+        iRef->SaveItem();
+        char buf[160]; snprintf(buf, sizeof(buf), "withdrew corp %s (%u) to personal hangar", iRef->name(), itemID);
         resultMsg = buf;
         return true;
     }

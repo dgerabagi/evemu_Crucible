@@ -1250,6 +1250,14 @@ void DestinyManager::Turn() {   // tracking within 900m for Frigates, 1k4m for B
     }
     deltaHeading *= turnPercent;
     m_shipHeading += deltaHeading;
+    // VEV_TURN_NORMALIZE (Cycle 16, 2026-07-06): the increment lerps between two UNIT
+    // headings and lands INSIDE the unit sphere (chord), and m_velocity = m_shipHeading
+    // * speed -- every turn tick silently scaled the ship's REAL speed down (live-fired:
+    // |heading| decayed to 0.51 after ~60s of turning; engine speed scalar said 374 m/s
+    // while actual displacement was 192 -- the curator's 'afterburner no-op'). Direction
+    // is unchanged by renormalizing; only the magnitude lie is removed.
+    if (m_shipHeading.dotProduct(m_shipHeading) > 1.0e-12f)
+        m_shipHeading.normalize();
     if (is_log_enabled(DESTINY__TURN_TRACE))
         _log(DESTINY__TURN_TRACE, "Destiny::Turn() - tf:%.3f, turnTic:%u, degRemain:%.3f  (deltaHeading:%.5f, %.5f, %.5f * turnPercent:%.2f) = shipHeading:%.3f, %.3f, %.3f", \
             m_timeFraction, m_turnTic, degrees, deltaHeading.x, deltaHeading.y, deltaHeading.z, turnPercent, m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
@@ -1276,11 +1284,13 @@ void DestinyManager::UpdateVisualHeading() {
     }
     if (dot < -1.0f) dot = -1.0f;
     else if (dot > 1.0f) dot = 1.0f;
-    float angRemain = std::acos(dot);                              // radians left to turn
-    float degStep = (60.0f - (float)m_shipAgility) / 10.0f;        // per-tic turn, ship-agility based (Turn() model)
-    if (degStep < 1.0f) degStep = 1.0f;                            // floor so the heaviest hulls still converge
-    float step = degStep * 0.0174532925f;                          // deg -> rad
-    float f = (angRemain > 1.0e-4f) ? (step / angRemain) : 1.0f;
+    // VEV_VISUAL_INERTIA_RATE (2026-06-28): ease the visual facing toward the movement heading at the SAME
+    // EVE rate the velocity accelerates -- alpha = 1 - e^(-dt/tau), tau = m_shipAgility = mass*inertia = the
+    // align time -- so the ship turns in ~its align time (EVE-real, matches the line ~1622 velocity accel).
+    // The old degStep = (60 - tau)/10 collapsed to a flat ~6 deg/sec for EVERY hull (tau is tiny next to 60)
+    // -> the curator's "rotates incredibly slowly". (dot clamp above is now unused but harmless.)
+    double tau = (double)m_shipAgility; if (tau < 0.1) tau = 0.1;  // safety: no div-by-zero / instant snap
+    float f = (float)(1.0 - exp(-1.0 / tau));                      // alpha per 1 Hz tick
     if (f > 1.0f) f = 1.0f;
     GVector delta(m_visualHeading, m_shipHeading);                 // = m_shipHeading - m_visualHeading
     delta *= f;
@@ -2497,6 +2507,12 @@ void DestinyManager::GotoPoint(const GPoint& point) {
     if (m_orbiting)
         ClearOrbit();
 
+    // VEV_GOTO_CLEARS_WARP (Cycle 16, 2026-07-06): a GOTO that interrupts an in-flight
+    // warp must free m_warpState -- IsWarping() keys the gateway's travelMode:'warp'
+    // stream, and a stale warpState left the 2D client drawing a permanent warp streak
+    // + never firing its arrival latch after a mode yank. Null-safe (SafeDelete).
+    SafeDelete(m_warpState);
+
     m_ballMode = Destiny::Ball::Mode::GOTO;
     m_targetPoint = point;
     BeginMovement();
@@ -2519,6 +2535,8 @@ void DestinyManager::GotoPoint(const GPoint& point) {
 void DestinyManager::MoveToPointAndStop(const GPoint& point, float speedFraction) {
     if (m_orbiting)
         ClearOrbit();
+
+    SafeDelete(m_warpState);   // VEV_GOTO_CLEARS_WARP: same rule as GotoPoint
 
     if (m_position.distance(point) < 1.0)
         return;   // already on the point
@@ -2600,6 +2618,16 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance/*0*/, bool autoP
     if (mySE->IsNPCSE() or mySE->IsDroneSE() or mySE->IsAIShipSE()) {
         // do drones warp??
         m_ballMode = Destiny::Ball::Mode::WARP;
+
+        // VEV_AISHIP_WARP_PROPEL (2026-06-28, CS-001): the fast-path below only sends the VISUAL warp to the
+        // client; the AIShipSE phantom never built m_warpState, so ProcessState's WARP case fell into the
+        // per-tick alignment branch and crawled at sublight forever (the phantom mines a full hold then
+        // can't warp back to deposit -- "dock 209077km away (warp didn't land)"). Build the REAL warp engine
+        // for the phantom: InitWarp() sets m_stateStamp + m_warpState (its only Client* deref,
+        // GetShipSE()->Warp(), is HasPilot-guarded, so it is safe for the phantom), and ProcessState then
+        // propels accel/cruise/decel like a real ship -- no alignment crawl, no Client* deref, no SIGSEGV.
+        if (mySE->IsAIShipSE())
+            InitWarp();
 
         std::vector<PyTuple*> updates;
         CmdWarpTo wt;
@@ -3235,6 +3263,12 @@ Battleships 0.155
         m_shipWarpSpeed = sRef->GetAttribute(AttrWarpSpeedMultiplier).get_float();
     if (sRef->HasAttribute(AttrInetia))
         m_shipInertia = sRef->GetAttribute(AttrInetia).get_float();
+    else if (sRef->type().HasAttribute(AttrInetia))
+        // VEV_PHANTOM_INERTIA (2026-06-28): phantom (AIShipSE) hulls never run Ship::Init, so the ship-item
+        // inertia attr is absent -> m_shipInertia stays the ctor default 1.0 -> m_shipAgility (= mass*inertia
+        // = align-time tau) is ~4x too low -> wrong align/accel AND a too-slow visual turn. Mirror
+        // VEV_PHANTOM_VELOCITY below: seed inertia from the hull type when the item attr is missing.
+        m_shipInertia = sRef->type().GetAttribute(AttrInetia).get_float();
     if (sRef->HasAttribute(AttrMaxVelocity))
         m_maxShipSpeed = sRef->GetAttribute(AttrMaxVelocity).get_float();
     else if (sRef->type().HasAttribute(AttrMaxVelocity))

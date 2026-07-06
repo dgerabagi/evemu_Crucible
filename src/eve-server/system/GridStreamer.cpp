@@ -329,6 +329,11 @@ void StreamGridsTick() {
             if (se->IsShipSE() || se->IsAIShipSE()) {
                 e.ownerCharacterId = se->GetOwnerID();
                 e.travelMode = (dm != nullptr && dm->IsWarping()) ? "warp" : "subwarp";
+                // VEV_STREAM_MAXVEL (Cycle 16, 2026-07-06): live hull max speed -- SpeedBoost
+                // rewrites m_maxShipSpeed on prop-mod toggle, so this is AB/MWD-aware. The
+                // client HUD gauge + velocity arrow scale on the REAL 100% (GridProtocol.h
+                // already had the field + serializer; nothing filled it).
+                if (dm != nullptr) e.maxVelocity = dm->GetMaxVelocity();
                 // VEV_WARP_HUD: serialize warp telemetry + gate cloak so the CCTV
                 // observer can render the real warp readout (speed/distance/ETA) + cloak.
                 if (dm != nullptr && dm->IsWarping()) {

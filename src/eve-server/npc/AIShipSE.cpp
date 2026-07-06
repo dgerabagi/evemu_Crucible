@@ -187,7 +187,7 @@ void AIShipSE::Process() {
                 std::string rmsg;
                 sEntityList.ExecuteAICommand(m_charID, "dock", dp, rmsg);
                 return;  // dock despawned us — do not touch `this`
-            } else if (dist <= 150000.0) {
+            } else if (dist <= 130000.0) {   // VEV (CS-001): 130km = EVE warp-min; >130km warps to the gate, not sublight-crawls
                 // within grid but outside the dock gate: close the gap sublight,
                 // pending stays set so we re-check + dock once inside.
                 // VEV_DOCK_GOTO_ALIGN: guard like the warp branch -- re-issuing
@@ -195,7 +195,14 @@ void AIShipSE::Process() {
                 // activeSpeedFraction never climbs -> the ship crawls at ~96 m/s and
                 // never reaches the dock gate (XPL-Pathfinder, 2026-06-15). Issue it
                 // once; the station is stationary so the target never needs updating.
-                if (DestinyMgr()->GetState() != Destiny::Ball::Mode::GOTO)
+                // VEV_DOCK_HOLD_WARP (Cycle 16, 2026-07-06): do NOT GotoPoint while the dock
+                // warp is still IN FLIGHT -- this 5s tick lands 2-3 times inside the final ~12s
+                // of warp decel (<=130km), and GotoPoint here KILLED the warp mid-decel,
+                // stranding the ship a random 0-130km out at sublight (measured 26.1km / 35km /
+                // 69.5km across cycles). The warp lands inside the dock gate by construction
+                // (radius + rand(0,2000) < radius + 2500) -- let it finish; dock next tick.
+                if (DestinyMgr()->GetState() != Destiny::Ball::Mode::GOTO
+                    && DestinyMgr()->GetState() != Destiny::Ball::Mode::WARP)
                     DestinyMgr()->GotoPoint(pStation->GetPosition());
             } else if (DestinyMgr()->GetState() != Destiny::Ball::Mode::WARP) {
                 // VEV_DOCK_WARP_ALIGN: guard on the WARP ball-mode, NOT IsWarping().
@@ -216,8 +223,12 @@ void AIShipSE::Process() {
                 // sublight gap to close. Land mostly inside the radius+2500 dock gate; ~1 in 6
                 // just outside so the GOTO approach above closes a small gap (curator-corrected
                 // EVE behavior, replacing the old flat 15km approach).
-                double vevLandGap = (double)MakeRandomInt(0, 2500);
-                if (MakeRandomInt(0, 5) == 0) vevLandGap = (double)MakeRandomInt(2500, 3500);
+                // VEV_DOCK_WARP_TO_ZERO (CS-001 2026-06-25): land STRICTLY inside the dock gate
+                // (radius+2500) so the dock fires the very next tick -- no sublight crawl. The old
+                // 1-in-6 \"land 2500-3500m out\" dropped the AI pilot OUTSIDE the gate -> the GotoPoint
+                // sublight band -> the curator-observed \"warp to 0 = crawl from the edge\". EVE warp-to-0
+                // lands you 0-2500m from the perimeter and you dock; you never crawl the residual.
+                double vevLandGap = (double)MakeRandomInt(0, 2000);   // always < 2500 -> inside the dock gate
                 DestinyMgr()->WarpTo(pStation->GetPosition(), pStation->GetRadius() + vevLandGap);
             }
             // else far but warping: let the in-flight warp complete — do nothing.
